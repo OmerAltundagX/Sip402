@@ -32,7 +32,12 @@ export async function readSession(sessionId: bigint): Promise<OnchainSession> {
 export type PaymentCheck = { ok: true; blockNumber: bigint } | { ok: false; reason: string };
 
 /** Confirms that txHash is a successful pay() for exactly this session and chunk. */
-export async function verifyChunkPayment(txHash: Hash, sessionId: bigint, expectedIndex: number): Promise<PaymentCheck> {
+export async function verifyChunkPayment(
+  txHash: Hash,
+  sessionId: bigint,
+  expectedIndex: number,
+  pricePerChunk: bigint,
+): Promise<PaymentCheck> {
   // The payer already waited for the receipt, so it is usually available on the first call.
   const receipt = await client
     .getTransactionReceipt({ hash: txHash })
@@ -52,7 +57,7 @@ export async function verifyChunkPayment(txHash: Hash, sessionId: bigint, expect
       log.args.chunkIndex === BigInt(expectedIndex),
   );
   if (!paid) return { ok: false, reason: `no ChunkPaid event for chunk ${expectedIndex}` };
-  if (paid.args.amount < config.pricePerChunk) return { ok: false, reason: "payment below chunk price" };
+  if (paid.args.amount < pricePerChunk) return { ok: false, reason: "payment below chunk price" };
 
   return { ok: true, blockNumber: receipt.blockNumber };
 }

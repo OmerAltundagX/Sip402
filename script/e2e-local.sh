@@ -72,9 +72,10 @@ run() {
 start_server
 run server scripts/e2e-local.ts
 run server scripts/e2e-local.ts STOP_AFTER=2
+run server scripts/e2e-local.ts OFF_TIER=1
 run web scripts/session-local.mts
 run web scripts/session-local.mts STOP_AFTER=3
-run web scripts/session-local.mts CAP=0.1
+run web scripts/session-local.mts SIPS=10
 # Session 7 on a fresh contract straddles a storage page boundary (+8,000 gas).
 run web scripts/session-local.mts STOP_IN_FLIGHT=1
 run web scripts/session-local.mts STOP_IN_FLIGHT=5
@@ -82,6 +83,11 @@ run web scripts/session-local.mts PAUSE_AT=3 RESUME_AFTER_MS=1500
 run web scripts/session-local.mts PAUSE_AT=4 CANCEL_AFTER_MS=1500
 # The full demo flow: start, pause, resume, cancel, refund.
 run web scripts/session-local.mts PAUSE_AT=3 RESUME_AFTER_MS=1500 STOP_AFTER=6
+# Price tiers: full answer, cancel mid-stream, cap reached, demo flow.
+run web scripts/session-local.mts TIER=smart
+run web scripts/session-local.mts TIER=smart STOP_IN_FLIGHT=4
+run web scripts/session-local.mts TIER=pro SIPS=10
+run web scripts/session-local.mts TIER=pro PAUSE_AT=2 RESUME_AFTER_MS=1500 STOP_AFTER=5
 
 start_server STREAM_IDLE_TIMEOUT_MS=3000
 run web scripts/session-local.mts PAUSE_AT=2 RESUME_AFTER_MS=1500

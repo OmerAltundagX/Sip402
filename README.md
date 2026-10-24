@@ -76,4 +76,4 @@ Runs every case against a local anvil chain (chain ID 10143, so anvil applies Mo
 ./script/e2e-local.sh
 ```
 
-Cases: full answer, cancel after n payments, cancel while a payment is in flight, spending cap reached, a session whose storage straddles a page boundary, pause then resume, pause then cancel, and the paused-stream idle timeout (with a 3 s timeout).
+Cases: all three price tiers, an off-tier price refused by the provider, full answer, cancel after n payments, cancel while a payment is in flight, spending cap reached, a session whose storage straddles a page boundary, pause then resume, pause then cancel, and the paused-stream idle timeout (with a 3 s timeout).

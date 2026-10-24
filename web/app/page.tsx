@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { formatEther, parseEther, type Address, type Hash } from "viem";
+import { formatEther, type Address, type Hash } from "viem";
 import { explorerAddress, explorerTx, monadTestnet } from "@sip402/shared/monad";
 import { Glass } from "@/components/Glass";
 import { Metrics } from "@/components/Metrics";
@@ -13,13 +13,15 @@ import {
   type EndReason,
   type Payment,
   type Phase,
+  type PriceTier,
   type ProviderInfo,
   type SessionSummary as Summary,
 } from "@/lib/session";
 import { connectWallet, reconnectWallet, switchToMonad, watchWallet, type WalletState } from "@/lib/wallet";
 
 const SUGGESTIONS = ["How does Sip402 work?", "Why is Monad so fast?", "Why pay for AI by the chunk?"];
-const CAPS = ["0.1", "0.2", "0.3"];
+/** Spending cap in sips; the deposit is sips × the tier's price. */
+const SIP_CAPS = [10, 20, 30];
 
 type Closed = { hash: Hash; chunksPaid: number; refundWei: bigint; reason: EndReason };
 type Opened = { sessionId: bigint; hash: Hash; sessionKey: Address; maxChunks: number; gasAllowanceWei: bigint };
@@ -54,7 +56,10 @@ export default function Home() {
   const [owner, setOwner] = useState<Address>();
   const [sessionCap, setSessionCap] = useState<bigint>();
   const [prompt, setPrompt] = useState(SUGGESTIONS[0]);
-  const [cap, setCap] = useState(CAPS[1]);
+  const [sips, setSips] = useState(SIP_CAPS[1]);
+  const [tierId, setTierId] = useState<string>();
+  /** Price the current session was opened with. */
+  const [sessionPrice, setSessionPrice] = useState<bigint>();
   const [phase, setPhase] = useState<Phase>("idle");
   const [detail, setDetail] = useState<string>();
   const [chunks, setChunks] = useState<string[]>([]);
@@ -86,7 +91,14 @@ export default function Home() {
 
   const active = phase !== "idle" && phase !== "done" && phase !== "error";
   const wrongChain = wallet !== undefined && wallet.chainId !== monadTestnet.id;
-  const capWei = sessionCap ?? parseEther(cap);
+  const tiers: PriceTier[] = info
+    ? info.tiers.length > 0
+      ? info.tiers
+      : [{ id: "default", label: "Standard", pricePerChunk: info.pricePerChunk }]
+    : [];
+  const tier = tiers.find((t) => t.id === tierId) ?? tiers[0];
+  const nextCapWei = tier ? BigInt(sips) * tier.pricePerChunk : 0n;
+  const capWei = sessionCap ?? nextCapWei;
   const spentWei = payments.reduce((a, p) => a + p.priceWei, 0n);
   const waitingForPayment = phase === "streaming" && chunks.length > payments.length;
 
@@ -115,8 +127,8 @@ export default function Home() {
   }
 
   function onAsk() {
-    if (!wallet || !info || active || wrongChain) return;
-    const askCap = parseEther(cap);
+    if (!wallet || !info || !tier || active || wrongChain) return;
+    const askCap = BigInt(sips) * tier.pricePerChunk;
     setChunks([]);
     setTotal(0);
     setPayments([]);
@@ -127,8 +139,10 @@ export default function Home() {
     setError(undefined);
     setOwner(wallet.address);
     setSessionCap(askCap);
+    setSessionPrice(tier.pricePerChunk);
 
-    const s = new SipSession(wallet.client, wallet.address, info, {
+    // The tier only sets the session's price per chunk; everything else is unchanged.
+    const s = new SipSession(wallet.client, wallet.address, { ...info, pricePerChunk: tier.pricePerChunk }, {
       onPhase: (p, d) => {
         setPhase(p);
         setDetail(d);
@@ -202,6 +216,30 @@ export default function Home() {
       <div className="mt-8 grid gap-6 lg:grid-cols-[1fr_340px]">
         <section className="space-y-4">
           <div className="rounded-2xl border border-line bg-panel p-4">
+            {tiers.length > 1 && (
+              <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Model tier">
+                {tiers.map((t) => {
+                  const selected = t.id === tier?.id;
+                  return (
+                    <button
+                      key={t.id}
+                      role="radio"
+                      aria-checked={selected}
+                      onClick={() => setTierId(t.id)}
+                      disabled={active}
+                      className={`rounded-xl border px-4 py-2 text-left transition-colors disabled:cursor-not-allowed ${
+                        selected
+                          ? "border-monad bg-monad/15"
+                          : "border-line bg-background hover:border-monad/60 disabled:opacity-40"
+                      }`}
+                    >
+                      <div className="font-semibold">{t.label}</div>
+                      <div className="font-mono text-xs text-muted">{formatEther(t.pricePerChunk)} MON per sip</div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             <div className="flex flex-col gap-3 sm:flex-row">
               <input
                 value={prompt}
@@ -211,15 +249,15 @@ export default function Home() {
                 placeholder="Ask anything"
               />
               <select
-                value={cap}
-                onChange={(e) => setCap(e.target.value)}
+                value={sips}
+                onChange={(e) => setSips(Number(e.target.value))}
                 disabled={active}
                 className="rounded-xl border border-line bg-background px-3 py-3 font-mono text-sm disabled:opacity-60"
                 aria-label="Spending cap"
               >
-                {CAPS.map((c) => (
+                {SIP_CAPS.map((c) => (
                   <option key={c} value={c}>
-                    cap {c} MON
+                    up to {c} sips
                   </option>
                 ))}
               </select>
@@ -270,10 +308,11 @@ export default function Home() {
                 </button>
               ))}
             </div>
-            {info && (
+            {tier && (
               <p className="mt-3 text-xs text-muted">
-                {formatEther(info.pricePerChunk)} MON per chunk · up to {Number(capWei / info.pricePerChunk)} chunks · unspent
-                balance is refunded
+                {tier.label} · {formatEther(tier.pricePerChunk)} MON per sip · spending cap {formatEther(nextCapWei)} MON for up
+                to {sips} sips · unspent balance is refunded
+                {active && " · tier is locked while a session is open"}
               </p>
             )}
           </div>
@@ -349,7 +388,7 @@ export default function Home() {
             </div>
             <LivePayments
               payments={payments}
-              pending={pendingSip !== undefined && info ? { index: pendingSip, priceWei: info.pricePerChunk } : undefined}
+              pending={pendingSip !== undefined && sessionPrice ? { index: pendingSip, priceWei: sessionPrice } : undefined}
             />
           </div>
         </section>

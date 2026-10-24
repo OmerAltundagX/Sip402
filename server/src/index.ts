@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import cors from "cors";
 import express, { type Response } from "express";
-import { isHash, verifyMessage, type Hex } from "viem";
+import { formatEther, isHash, verifyMessage, type Hex } from "viem";
 import { monadTestnet } from "@sip402/shared/monad";
 import { askMessage } from "@sip402/shared/protocol";
 import { answerFor, toChunks } from "./answers";
@@ -10,6 +10,8 @@ import { config } from "./config";
 
 type Stream = {
   sessionId: bigint;
+  /** Price per chunk of the session's tier, as stored on-chain. */
+  pricePerChunk: bigint;
   chunks: string[];
   /** Number of chunks paid and verified on-chain. Chunk `paid` is the one currently delivered. */
   paid: number;
@@ -61,7 +63,9 @@ app.get("/info", (_req, res) => {
     chainId: monadTestnet.id,
     contract: config.contract,
     provider: config.provider,
-    pricePerChunk: config.pricePerChunk.toString(),
+    // Default tier's price, kept for clients that do not know about tiers.
+    pricePerChunk: config.tiers[0].pricePerChunk.toString(),
+    tiers: config.tiers.map((t) => ({ id: t.id, label: t.label, pricePerChunk: t.pricePerChunk.toString() })),
   });
 });
 
@@ -76,7 +80,8 @@ app.post("/ask", async (req, res) => {
   const session = await readSession(BigInt(sessionId));
   if (!session.open) return res.status(400).json({ error: "session is not open" });
   if (session.provider !== config.provider) return res.status(400).json({ error: "session is for another provider" });
-  if (session.pricePerChunk < config.pricePerChunk) return res.status(400).json({ error: "price per chunk too low" });
+  const tier = config.tiers.find((t) => t.pricePerChunk === session.pricePerChunk);
+  if (!tier) return res.status(400).json({ error: "session price does not match any price tier" });
   if (session.chunksPaid !== 0n) return res.status(400).json({ error: "session already used" });
 
   const signed = await verifyMessage({
@@ -88,10 +93,10 @@ app.post("/ask", async (req, res) => {
 
   const chunks = toChunks(answerFor(prompt), config.wordsPerChunk);
   const token = randomUUID();
-  streams.set(token, { sessionId: BigInt(sessionId), chunks, paid: 0, verifying: false, lastActivity: Date.now() });
+  streams.set(token, { sessionId: BigInt(sessionId), pricePerChunk: tier.pricePerChunk, chunks, paid: 0, verifying: false, lastActivity: Date.now() });
   sessionsInUse.add(sessionId);
 
-  res.json({ token, totalChunks: chunks.length, affordableChunks: (session.deposit / session.pricePerChunk).toString() });
+  res.json({ token, tier: tier.id, totalChunks: chunks.length, affordableChunks: (session.deposit / session.pricePerChunk).toString() });
 });
 
 /**
@@ -144,7 +149,7 @@ app.post("/paid", async (req, res) => {
   const started = performance.now();
   try {
     const chunkIndex = stream.paid;
-    const check = await verifyChunkPayment(txHash, stream.sessionId, chunkIndex);
+    const check = await verifyChunkPayment(txHash, stream.sessionId, chunkIndex, stream.pricePerChunk);
     const verifyMs = Math.round(performance.now() - started);
     if (!check.ok) return res.status(402).json({ error: check.reason, verifyMs });
 
@@ -166,5 +171,6 @@ app.use((err: Error, _req: express.Request, res: Response, _next: express.NextFu
 
 app.listen(config.port, () => {
   console.log(`Sip402 provider listening on http://localhost:${config.port}`);
-  console.log(`contract ${config.contract}, provider ${config.provider}, price ${config.pricePerChunk} wei/chunk`);
+  console.log(`contract ${config.contract}, provider ${config.provider}`);
+  console.log(`tiers: ${config.tiers.map((t) => `${t.label} ${formatEther(t.pricePerChunk)} MON`).join(", ")}`);
 });

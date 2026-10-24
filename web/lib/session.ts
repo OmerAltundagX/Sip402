@@ -24,7 +24,10 @@ export const publicClient = createPublicClient({
   pollingInterval: 50,
 });
 
-export type ProviderInfo = { contract: Address; provider: Address; pricePerChunk: bigint };
+export type PriceTier = { id: string; label: string; pricePerChunk: bigint };
+
+/** pricePerChunk is the price the session is opened with; the page sets it from the chosen tier. */
+export type ProviderInfo = { contract: Address; provider: Address; pricePerChunk: bigint; tiers: PriceTier[] };
 
 export type Phase =
   | "idle"
@@ -97,7 +100,11 @@ export async function fetchProviderInfo(): Promise<ProviderInfo> {
   const res = await fetch(`${SERVER_URL}/info`);
   if (!res.ok) throw new Error(`Provider server returned ${res.status}`);
   const body = await res.json();
-  return { contract: body.contract, provider: body.provider, pricePerChunk: BigInt(body.pricePerChunk) };
+  const tiers: PriceTier[] = (body.tiers ?? []).map((t: { id: string; label: string; pricePerChunk: string }) => ({
+    ...t,
+    pricePerChunk: BigInt(t.pricePerChunk),
+  }));
+  return { contract: body.contract, provider: body.provider, pricePerChunk: BigInt(body.pricePerChunk), tiers };
 }
 
 async function waitForBlock(target: bigint) {

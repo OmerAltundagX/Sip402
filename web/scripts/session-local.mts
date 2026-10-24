@@ -1,7 +1,8 @@
 // Drives the browser SipSession class from Node against a local anvil chain,
 // with anvil's unlocked account standing in for the browser wallet.
 // Usage (from web/): see README ("Local end-to-end test"). Options (env):
-//   CAP=0.2                 spending cap in MON
+//   TIER=smart              price tier id from the provider's /info (default: first tier)
+//   SIPS=20                 spending cap in sips (cap = SIPS × tier price)
 //   STOP_AFTER=n            Cancel right after payment n is reported
 //   STOP_IN_FLIGHT=n        Cancel ~100 ms after chunk n arrives, while its pay() is in flight
 //   PAUSE_AT=n              Pause ~100 ms after chunk n arrives (its pay() still finishes), then:
@@ -30,8 +31,13 @@ const transport = http(RPC);
 const reader = createPublicClient({ chain: monadTestnet, transport });
 const [payer] = await createWalletClient({ chain: monadTestnet, transport }).getAddresses();
 const wallet = createWalletClient({ chain: monadTestnet, transport });
-const info = await fetchProviderInfo();
-const cap = parseEther(process.env.CAP ?? "0.2");
+const provider = await fetchProviderInfo();
+const tier = process.env.TIER ? provider.tiers.find((t) => t.id === process.env.TIER) : provider.tiers[0];
+if (!tier) throw new Error(`unknown tier ${process.env.TIER}`);
+// Same as the page: the tier only sets the session's price per chunk.
+const info = { ...provider, pricePerChunk: tier.pricePerChunk };
+const cap = BigInt(num("SIPS") ?? 20) * tier.pricePerChunk;
+console.log(`tier ${tier.label}: ${formatEther(tier.pricePerChunk)} MON per sip, cap ${formatEther(cap)} MON`);
 const before = await reader.getBalance({ address: payer });
 
 const check = (ok: boolean, message: string) => {
@@ -136,6 +142,16 @@ console.log(
 check(s.chunksPaid === paid && s.refundWei === refund && s.sweptWei === swept, "summary disagrees with session events");
 check(walletNetCost(s) === s.netCostWei, "summary lines do not add up");
 check(s.netCostWei === net, `summary net cost ${formatEther(s.netCostWei)} != payer balance change ${formatEther(net)}`);
+check(s.priceWei === tier.pricePerChunk && s.capWei === cap, "summary does not use the tier price");
+// Everything that came back = deposit − paid to provider − gas spent by the session key − dust.
+const keyGas = s.fees.paysWei + s.fees.closeWei + s.fees.sweepWei;
+check(
+  s.refundWei + s.sweptWei === s.depositWei - s.paidToProviderWei - keyGas - s.dustWei,
+  "refund + returned gas != deposit − paid − gas",
+);
+console.log(
+  `returned ${formatEther(s.refundWei + s.sweptWei)} = deposit ${formatEther(s.depositWei)} − paid ${formatEther(s.paidToProviderWei)} − gas ${formatEther(keyGas)} − dust ${formatEther(s.dustWei)}`,
+);
 // Net cost = content + all gas; the gas allowance must have come back.
 const content = BigInt(paid) * info.pricePerChunk;
 check(net >= content && net <= content + parseEther("0.05"), `unexpected net cost ${formatEther(net)}`);

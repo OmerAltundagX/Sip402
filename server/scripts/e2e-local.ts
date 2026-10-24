@@ -18,6 +18,8 @@ import { sip402Abi } from "@sip402/shared/sip402Abi";
 const RPC_URL = process.env.RPC_URL ?? "http://127.0.0.1:8545";
 const SERVER_URL = process.env.SERVER_URL ?? "http://localhost:3001";
 const STOP_AFTER = process.env.STOP_AFTER ? Number(process.env.STOP_AFTER) : Infinity;
+// OFF_TIER=1 opens the session at a price that is not a tier and expects /ask to refuse it.
+const OFF_TIER = process.env.OFF_TIER === "1";
 const PROMPT = process.env.PROMPT ?? "How does Sip402 work?";
 
 const chain = { ...monadTestnet, rpcUrls: { default: { http: [RPC_URL] } } };
@@ -28,7 +30,7 @@ const info = (await (await fetch(`${SERVER_URL}/info`)).json()) as {
   provider: Address;
   pricePerChunk: string;
 };
-const price = BigInt(info.pricePerChunk);
+const price = BigInt(info.pricePerChunk) + (OFF_TIER ? 1n : 0n);
 
 // The payer is anvil's first unlocked account, so no private key is needed here.
 const [payerAddress] = await createWalletClient({ chain, transport: http() }).getAddresses();
@@ -60,6 +62,12 @@ const askRes = await fetch(`${SERVER_URL}/ask`, {
   body: JSON.stringify({ sessionId, prompt: PROMPT, signature }),
 });
 const ask = (await askRes.json()) as { token: string; totalChunks: number; error?: string };
+if (OFF_TIER) {
+  if (askRes.ok || !/does not match any price tier/.test(ask.error ?? "")) throw new Error(`off-tier session accepted: ${ask.error}`);
+  console.log(`off-tier price refused: ${ask.error}`);
+  console.log("E2E OK");
+  process.exit(0);
+}
 if (!askRes.ok) throw new Error(`/ask failed: ${ask.error}`);
 console.log(`answer has ${ask.totalChunks} chunks`);
 
