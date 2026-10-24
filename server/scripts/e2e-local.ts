@@ -11,9 +11,9 @@ import {
   type Hash,
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { GAS_LIMITS, monadTestnet } from "../../shared/monad";
-import { askMessage } from "../../shared/protocol";
-import { sip402Abi } from "../../shared/sip402Abi";
+import { GAS_LIMITS, monadTestnet } from "@sip402/shared/monad";
+import { askMessage } from "@sip402/shared/protocol";
+import { sip402Abi } from "@sip402/shared/sip402Abi";
 
 const RPC_URL = process.env.RPC_URL ?? "http://127.0.0.1:8545";
 const SERVER_URL = process.env.SERVER_URL ?? "http://localhost:3001";

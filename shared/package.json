@@ -1,0 +1,13 @@
+{
+  "name": "@sip402/shared",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./monad": "./monad.ts",
+    "./protocol": "./protocol.ts",
+    "./sip402Abi": "./sip402Abi.ts"
+  },
+  "peerDependencies": {
+    "viem": "^2"
+  }
+}

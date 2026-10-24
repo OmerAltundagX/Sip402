@@ -1,5 +1,5 @@
 import { getAddress, parseEther } from "viem";
-import { SIP402_ADDRESS } from "../../shared/monad";
+import { SIP402_ADDRESS } from "@sip402/shared/monad";
 
 function required(name: string): string {
   const value = process.env[name];

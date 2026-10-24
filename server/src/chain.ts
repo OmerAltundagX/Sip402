@@ -1,6 +1,6 @@
 import { createPublicClient, http, parseEventLogs, type Address, type Hash } from "viem";
-import { monadTestnet } from "../../shared/monad";
-import { sip402Abi } from "../../shared/sip402Abi";
+import { monadTestnet } from "@sip402/shared/monad";
+import { sip402Abi } from "@sip402/shared/sip402Abi";
 import { config } from "./config";
 
 export const client = createPublicClient({

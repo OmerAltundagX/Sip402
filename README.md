@@ -47,6 +47,22 @@ npm run server
 | `GET /stream/:token` | SSE: `chunk { index, text, total }`, then `done` |
 | `POST /paid` `{ token, txHash }` | Verifies the `ChunkPaid` event for the current chunk, then releases the next one |
 
+## Web app
+
+```shell
+npm run server   # terminal 1
+npm run web      # terminal 2, then open http://localhost:3000
+```
+
+Connect an injected wallet (MetaMask etc.), pick a question and a spending cap, and press **Ask**. The wallet signs only `openSession`; an in-memory session key signs every `pay()`, the `close()` and a final sweep that returns the unused gas allowance. Live metrics show measured send-to-receipt time on Monad next to a labeled 12 s-per-block Ethereum estimate.
+
+Monad specifics handled in `web/lib/session.ts`:
+
+- **Gas limit billing**: every transaction uses a tight, measured gas limit from `shared/monad.ts`.
+- **Reserve balance rule**: the session key waits 3 blocks after being funded before its first `pay()`, and 3 blocks after `close()` before sweeping its leftover balance.
+- **Latency**: payments use `eth_sendRawTransactionSync`, which returns the receipt in one round trip, with a fallback to send and poll.
+- **Nonces**: one payment in flight at a time, with a local nonce counter that is resynced from the chain on errors.
+
 ### Local end-to-end test
 
 Runs the full flow against anvil without spending testnet MON:
@@ -58,4 +74,8 @@ forge create src/Sip402.sol:Sip402 --rpc-url http://127.0.0.1:8545 --unlocked --
 PROVIDER_ADDRESS=<anvil account 1> CONTRACT_ADDRESS=<local address> RPC_URL=http://127.0.0.1:8545 npx tsx src/index.ts
 RPC_URL=http://127.0.0.1:8545 npx tsx scripts/e2e-local.ts            # full answer
 STOP_AFTER=2 RPC_URL=http://127.0.0.1:8545 npx tsx scripts/e2e-local.ts  # stop and refund
+# in web/: drive the browser SipSession class (open, warm-up, pay, close, sweep)
+npx tsx scripts/session-local.mts                 # full answer
+STOP_AFTER=3 npx tsx scripts/session-local.mts    # stop
+CAP=0.1 npx tsx scripts/session-local.mts         # spending cap reached
 ```

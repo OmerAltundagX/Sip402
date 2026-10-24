@@ -7,7 +7,7 @@ const ANSWERS: { match: RegExp; text: string }[] = [
     text:
       "Monad is an EVM-compatible Layer 1 built for speed without giving up decentralization. " +
       "It runs ten thousand transactions per second by separating consensus from execution, so validators agree on transaction order first and execute right after. " +
-      "MonadBFT, its consensus protocol, produces a block about every four hundred milliseconds and finalizes it in under a second." +
+      "MonadBFT, its consensus protocol, produces a block about every four hundred milliseconds and finalizes it in under a second. " +
       "Execution is optimistic and parallel: transactions run at the same time and are re-executed only when they truly conflict. " +
       "MonadDb, a custom state database, keeps storage reads from becoming the bottleneck on ordinary hardware. " +
       "Because it is fully EVM compatible, Solidity contracts and tools like Foundry and viem work unchanged. " +
@@ -15,7 +15,7 @@ const ANSWERS: { match: RegExp; text: string }[] = [
       "That is exactly what makes per-chunk payments, like the ones funding this answer, practical without payment channels.",
   },
   {
-    match: /sip402|how does|how it works|pay/i,
+    match: /sip402|how does it work|how it works/i,
     text:
       "Sip402 lets you pay for an AI answer one piece at a time instead of buying a subscription. " +
       "When you start, you deposit a small spending cap into a smart contract and authorize a temporary session key. " +
@@ -42,18 +42,22 @@ export function answerFor(prompt: string): string {
   return ANSWERS.find((a) => a.match.test(prompt))?.text ?? FALLBACK;
 }
 
-/** Splits text into chunks of whole sentences with at least `targetWords` words each. */
+/**
+ * Splits text into chunks of about `targetWords` words, ending early at a
+ * sentence boundary when one falls in the last third of the chunk.
+ */
 export function toChunks(text: string, targetWords: number): string[] {
-  const sentences = text.match(/[^.!?]+[.!?]+\s*/g) ?? [text];
+  const words = text.match(/\S+\s*/g) ?? [text];
   const chunks: string[] = [];
-  let current = "";
-  for (const sentence of sentences) {
-    current += sentence;
-    if (current.trim().split(/\s+/).length >= targetWords) {
-      chunks.push(current);
-      current = "";
+  let current: string[] = [];
+  for (const word of words) {
+    current.push(word);
+    const sentenceEnd = /[.!?]\s*$/.test(word) && current.length >= Math.ceil(targetWords * 0.7);
+    if (current.length >= targetWords || sentenceEnd) {
+      chunks.push(current.join(""));
+      current = [];
     }
   }
-  if (current) chunks.push(current);
+  if (current.length) chunks.push(current.join(""));
   return chunks;
 }

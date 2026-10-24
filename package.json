@@ -1,7 +1,7 @@
 {
   "name": "sip402",
   "private": true,
-  "workspaces": ["server", "web"],
+  "workspaces": ["shared", "server", "web"],
   "scripts": {
     "server": "npm run dev -w server",
     "web": "npm run dev -w web"
