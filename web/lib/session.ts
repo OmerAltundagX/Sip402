@@ -45,9 +45,39 @@ export type Payment = {
   confirmMs: number;
   /** Provider's on-chain check before releasing the next chunk; null if reported after Cancel. */
   verifyMs: number | null;
-  /** gasUsed × effectiveGasPrice from the receipt. */
+  /** Gas limit × effective gas price: what Monad charged (see chargedFee). */
   feeWei: bigint;
   priceWei: bigint;
+};
+
+/** Why a session was closed. */
+export type EndReason = "completed" | "cancelled" | "cap" | "error";
+
+/** Where every wei of a finished session went, from receipts and final balances. */
+export type SessionSummary = {
+  reason: EndReason;
+  payer: Address;
+  provider: Address;
+  sessionKey: Address;
+  capWei: bigint;
+  gasAllowanceWei: bigint;
+  /** cap + gas allowance, sent with openSession. */
+  depositWei: bigint;
+  openTx: Hash;
+  chunksPaid: number;
+  priceWei: bigint;
+  paidToProviderWei: bigint;
+  fees: { openWei: bigint; paysWei: bigint; closeWei: bigint; sweepWei: bigint; totalWei: bigint };
+  closeTx: Hash;
+  /** Unspent cap returned by close(), an internal transfer in the close transaction. */
+  refundWei: bigint;
+  sweepTx?: Hash;
+  /** Leftover gas allowance sent back from the session key. */
+  sweptWei: bigint;
+  /** Left on the session key after the sweep (gas price headroom that was not charged). */
+  dustWei: bigint;
+  /** What the payer's wallet is down: paid to provider + all network fees + dust. */
+  netCostWei: bigint;
 };
 
 export type SessionEvents = {
@@ -55,8 +85,9 @@ export type SessionEvents = {
   onOpened: (info: { sessionId: bigint; hash: Hash; sessionKey: Address; maxChunks: number; gasAllowanceWei: bigint }) => void;
   onChunk: (chunk: { index: number; text: string; total: number }) => void;
   onPayment: (payment: Payment) => void;
-  onClosed: (info: { hash: Hash; chunksPaid: number; refundWei: bigint; reason: string }) => void;
+  onClosed: (info: { hash: Hash; chunksPaid: number; refundWei: bigint; reason: EndReason }) => void;
   onSwept: (info: { hash: Hash; amountWei: bigint } | null) => void;
+  onSummary: (summary: SessionSummary) => void;
   onError: (message: string) => void;
 };
 
@@ -72,6 +103,13 @@ async function waitForBlock(target: bigint) {
     await new Promise((r) => setTimeout(r, 100));
   }
 }
+
+/**
+ * Monad charges the full gas limit, not the gas used. Testnet receipts report
+ * gasUsed = gas limit, but anvil's Monad mode reports actual usage while still
+ * charging the limit, so the fee is computed from the limit on both.
+ */
+const chargedFee = (gasLimit: bigint, receipt: TransactionReceipt) => gasLimit * receipt.effectiveGasPrice;
 
 const errorMessage = (err: unknown) =>
   err instanceof Error ? ((err as { shortMessage?: string }).shortMessage ?? err.message) : String(err);
@@ -110,6 +148,11 @@ export class SipSession {
   private pendingIndex?: number;
   private lastChunkIndex = -1;
   private finished?: Promise<void>;
+  private capWei = 0n;
+  private gasAllowanceWei = 0n;
+  private openTx?: Hash;
+  private openFeeWei = 0n;
+  private payFeesWei = 0n;
 
   constructor(
     private readonly wallet: WalletClient,
@@ -153,7 +196,7 @@ export class SipSession {
     this.stopped = true;
     // The stream stays open until the in-flight payment settles, so the provider
     // still accepts its /paid report; closeAndSweep() closes it afterwards.
-    void this.queue.then(() => this.finish("cancelled by user"));
+    void this.queue.then(() => this.finish("cancelled"));
   }
 
   private enqueuePayment(index: number) {
@@ -188,6 +231,12 @@ export class SipSession {
     });
     const receipt = await publicClient.waitForTransactionReceipt({ hash });
     if (receipt.status !== "success") throw new Error("openSession reverted");
+    this.capWei = capWei;
+    this.gasAllowanceWei = gasAllowance;
+    this.openTx = hash;
+    // Read the limit back from the transaction in case the wallet changed it.
+    const openTx = await publicClient.getTransaction({ hash });
+    this.openFeeWei = chargedFee(openTx.gas, receipt);
     const [opened] = parseEventLogs({ abi: sip402Abi, logs: receipt.logs, eventName: "SessionOpened" });
     this.sessionId = opened.args.sessionId;
     this.events.onOpened({
@@ -258,7 +307,7 @@ export class SipSession {
     });
     source.addEventListener("done", () => {
       source.close();
-      void this.queue.then(() => this.finish("answer complete"));
+      void this.queue.then(() => this.finish("completed"));
     });
     source.addEventListener("expired", () => {
       source.close();
@@ -283,15 +332,18 @@ export class SipSession {
     if (this.paid >= this.maxChunks) {
       this.source?.close();
       this.stopped = true;
-      void this.finish("spending cap reached");
+      void this.finish("cap");
       return;
     }
 
     const started = performance.now();
-    const receipt = await this.sendFromKey("pay", this.gas.pay);
+    const gasLimit = this.gas.pay;
+    const receipt = await this.sendFromKey("pay", gasLimit);
     const confirmMs = performance.now() - started;
     if (receipt.status !== "success") throw new Error(`pay() for chunk ${index + 1} reverted (tx ${receipt.transactionHash})`);
     this.paid++;
+    const feeWei = chargedFee(gasLimit, receipt);
+    this.payFeesWei += feeWei;
 
     // The first payment created the provider's account; later ones are cheaper.
     const reestimate = this.providerEmpty
@@ -308,7 +360,7 @@ export class SipSession {
       hash: receipt.transactionHash,
       confirmMs,
       verifyMs,
-      feeWei: receipt.gasUsed * receipt.effectiveGasPrice,
+      feeWei,
       priceWei: this.info.pricePerChunk,
     });
   }
@@ -376,12 +428,12 @@ export class SipSession {
     this.nonce = await publicClient.getTransactionCount({ address: this.sessionKey.address, blockTag: "pending" });
   }
 
-  private finish(reason: string) {
+  private finish(reason: EndReason) {
     this.finished ??= this.closeAndSweep(reason).catch((err) => this.fail(err));
     return this.finished;
   }
 
-  private async closeAndSweep(reason: string) {
+  private async closeAndSweep(reason: EndReason) {
     this.source?.close();
     // Best effort: the provider also drops the stream after its idle timeout.
     if (this.token) {
@@ -395,34 +447,69 @@ export class SipSession {
     const receipt = await this.sendFromKey("close", this.gas.close);
     if (receipt.status !== "success") throw new Error("close() reverted");
     const [closed] = parseEventLogs({ abi: sip402Abi, logs: receipt.logs, eventName: "SessionClosed" });
-    this.events.onClosed({
+    const closeInfo = {
       hash: receipt.transactionHash,
       chunksPaid: Number(closed.args.chunksPaid),
       refundWei: closed.args.refund,
       reason,
-    });
+    };
+    this.events.onClosed(closeInfo);
+    const closeFeeWei = chargedFee(this.gas.close, receipt);
 
     // Sending value from an account below the reserve only works as an "emptying"
     // transaction: no other transaction from it in the last 3 blocks.
     this.events.onPhase("sweeping", "Returning leftover gas allowance to your wallet");
     await waitForBlock(receipt.blockNumber + RESERVE_LAG_BLOCKS);
-    const balance = await publicClient.getBalance({ address: this.sessionKey.address });
-    const maxFee = TRANSFER_GAS * this.fees.maxFeePerGas;
-    if (balance <= maxFee) {
-      this.events.onSwept(null);
-    } else {
-      const hash = await this.keyWallet.sendTransaction({
-        to: this.payer,
-        value: balance - maxFee,
-        gas: TRANSFER_GAS,
-        nonce: this.nonce,
-        ...this.fees,
-      });
-      this.nonce++;
-      const sweep = await publicClient.waitForTransactionReceipt({ hash, pollingInterval: 50 });
-      this.events.onSwept(sweep.status === "success" ? { hash, amountWei: balance - maxFee } : null);
-    }
+    const sweep = await this.sweep();
+    this.events.onSwept(sweep.tx ? { hash: sweep.tx, amountWei: sweep.sweptWei } : null);
+
+    const dustWei = await publicClient.getBalance({ address: this.sessionKey.address });
+    this.events.onSummary(
+      buildSummary({
+        reason,
+        payer: this.payer,
+        provider: this.info.provider,
+        sessionKey: this.sessionKey.address,
+        capWei: this.capWei,
+        gasAllowanceWei: this.gasAllowanceWei,
+        openTx: this.openTx!,
+        chunksPaid: closeInfo.chunksPaid,
+        priceWei: this.info.pricePerChunk,
+        fees: { openWei: this.openFeeWei, paysWei: this.payFeesWei, closeWei: closeFeeWei, sweepWei: sweep.feeWei },
+        closeTx: closeInfo.hash,
+        refundWei: closeInfo.refundWei,
+        sweepTx: sweep.tx,
+        sweptWei: sweep.sweptWei,
+        dustWei,
+      }),
+    );
     this.events.onPhase("done");
+  }
+
+  /** Sends the session key's remaining balance, minus the transfer fee, back to the payer. */
+  private async sweep(): Promise<{ tx?: Hash; sweptWei: bigint; feeWei: bigint }> {
+    const [balance, block] = await Promise.all([
+      publicClient.getBalance({ address: this.sessionKey.address }),
+      publicClient.getBlock(),
+    ]);
+    // Little headroom over the current base fee keeps the uncharged remainder (dust) small.
+    const maxFeePerGas = ((block.baseFeePerGas ?? 0n) * 11n) / 10n + this.fees.maxPriorityFeePerGas;
+    const maxFee = TRANSFER_GAS * maxFeePerGas;
+    if (balance <= maxFee) return { sweptWei: 0n, feeWei: 0n };
+
+    const value = balance - maxFee;
+    const hash = await this.keyWallet.sendTransaction({
+      to: this.payer,
+      value,
+      gas: TRANSFER_GAS,
+      nonce: this.nonce,
+      maxFeePerGas,
+      maxPriorityFeePerGas: this.fees.maxPriorityFeePerGas,
+    });
+    this.nonce++;
+    const receipt = await publicClient.waitForTransactionReceipt({ hash, pollingInterval: 50 });
+    const feeWei = chargedFee(TRANSFER_GAS, receipt);
+    return { tx: hash, sweptWei: receipt.status === "success" ? value : 0n, feeWei };
   }
 
   private fail(err: unknown) {
@@ -436,3 +523,25 @@ export class SipSession {
     }
   }
 }
+
+export function buildSummary(
+  input: Omit<SessionSummary, "depositWei" | "paidToProviderWei" | "netCostWei" | "fees"> & {
+    fees: Omit<SessionSummary["fees"], "totalWei">;
+  },
+): SessionSummary {
+  const fees = { ...input.fees, totalWei: input.fees.openWei + input.fees.paysWei + input.fees.closeWei + input.fees.sweepWei };
+  const paidToProviderWei = BigInt(input.chunksPaid) * input.priceWei;
+  return {
+    ...input,
+    fees,
+    depositWei: input.capWei + input.gasAllowanceWei,
+    paidToProviderWei,
+    netCostWei: paidToProviderWei + fees.totalWei + input.dustWei,
+  };
+}
+
+/**
+ * The same net cost seen from the wallet: deposit and open fee out, refund and sweep back.
+ * Must equal summary.netCostWei; a mismatch means a transfer is missing from the summary.
+ */
+export const walletNetCost = (s: SessionSummary) => s.depositWei + s.fees.openWei - s.refundWei - s.sweptWei;

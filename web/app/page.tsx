@@ -1,18 +1,27 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { formatEther, parseEther, type Address, type Hash, type WalletClient } from "viem";
-import { explorerAddress, explorerTx } from "@sip402/shared/monad";
+import { formatEther, parseEther, type Address, type Hash } from "viem";
+import { explorerAddress, explorerTx, monadTestnet } from "@sip402/shared/monad";
 import { Glass } from "@/components/Glass";
 import { Metrics } from "@/components/Metrics";
 import { PaymentLog } from "@/components/PaymentLog";
-import { fetchProviderInfo, SipSession, type Payment, type Phase, type ProviderInfo } from "@/lib/session";
-import { connectWallet } from "@/lib/wallet";
+import { SessionSummary } from "@/components/SessionSummary";
+import {
+  fetchProviderInfo,
+  SipSession,
+  type EndReason,
+  type Payment,
+  type Phase,
+  type ProviderInfo,
+  type SessionSummary as Summary,
+} from "@/lib/session";
+import { connectWallet, reconnectWallet, switchToMonad, watchWallet, type WalletState } from "@/lib/wallet";
 
 const SUGGESTIONS = ["How does Sip402 work?", "Why is Monad so fast?", "Why pay for AI by the chunk?"];
 const CAPS = ["0.1", "0.2", "0.3"];
 
-type Closed = { hash: Hash; chunksPaid: number; refundWei: bigint; reason: string };
+type Closed = { hash: Hash; chunksPaid: number; refundWei: bigint; reason: EndReason };
 type Opened = { sessionId: bigint; hash: Hash; sessionKey: Address; maxChunks: number; gasAllowanceWei: bigint };
 
 const PHASE_LABEL: Record<Phase, string> = {
@@ -28,9 +37,22 @@ const PHASE_LABEL: Record<Phase, string> = {
   error: "Something went wrong",
 };
 
+/** Final status, so a finished answer never looks like a cancellation. */
+const END_LABEL: Record<EndReason, string> = {
+  completed: "Answer complete",
+  cancelled: "Cancelled",
+  cap: "Spending cap reached",
+  error: "Closed after an error",
+};
+
+const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+
 export default function Home() {
   const [info, setInfo] = useState<ProviderInfo>();
-  const [wallet, setWallet] = useState<{ client: WalletClient; address: Address }>();
+  const [wallet, setWallet] = useState<WalletState>();
+  /** The account that opened the current session; refunds and the sweep always go here. */
+  const [owner, setOwner] = useState<Address>();
+  const [sessionCap, setSessionCap] = useState<bigint>();
   const [prompt, setPrompt] = useState(SUGGESTIONS[0]);
   const [cap, setCap] = useState(CAPS[1]);
   const [phase, setPhase] = useState<Phase>("idle");
@@ -40,7 +62,7 @@ export default function Home() {
   const [payments, setPayments] = useState<Payment[]>([]);
   const [opened, setOpened] = useState<Opened>();
   const [closed, setClosed] = useState<Closed>();
-  const [swept, setSwept] = useState<{ hash: Hash; amountWei: bigint } | null>();
+  const [summary, setSummary] = useState<Summary>();
   const [error, setError] = useState<string>();
   const session = useRef<SipSession>(null);
 
@@ -48,8 +70,21 @@ export default function Home() {
     fetchProviderInfo().then(setInfo, (err) => setError(`Provider server unreachable: ${err.message}`));
   }, []);
 
+  // Pick up an already-authorized wallet, then follow account and network switches live.
+  useEffect(() => {
+    void reconnectWallet().then((w) => w && setWallet(w), () => {});
+    return watchWallet({
+      onAccount: (address) => {
+        if (!address) return setWallet(undefined);
+        void reconnectWallet().then(setWallet, () => {});
+      },
+      onChain: (chainId) => setWallet((prev) => (prev ? { ...prev, chainId } : prev)),
+    });
+  }, []);
+
   const active = phase !== "idle" && phase !== "done" && phase !== "error";
-  const capWei = parseEther(cap);
+  const wrongChain = wallet !== undefined && wallet.chainId !== monadTestnet.id;
+  const capWei = sessionCap ?? parseEther(cap);
   const spentWei = payments.reduce((a, p) => a + p.priceWei, 0n);
   const waitingForPayment = phase === "streaming" && chunks.length > payments.length;
 
@@ -63,22 +98,32 @@ export default function Home() {
   async function onConnect() {
     try {
       setError(undefined);
-      const { wallet, address } = await connectWallet();
-      setWallet({ client: wallet, address });
+      setWallet(await connectWallet());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function onSwitchNetwork() {
+    try {
+      await switchToMonad();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
   }
 
   function onAsk() {
-    if (!wallet || !info || active) return;
+    if (!wallet || !info || active || wrongChain) return;
+    const askCap = parseEther(cap);
     setChunks([]);
     setTotal(0);
     setPayments([]);
     setOpened(undefined);
     setClosed(undefined);
-    setSwept(undefined);
+    setSummary(undefined);
     setError(undefined);
+    setOwner(wallet.address);
+    setSessionCap(askCap);
 
     const s = new SipSession(wallet.client, wallet.address, info, {
       onPhase: (p, d) => {
@@ -96,11 +141,12 @@ export default function Home() {
       },
       onPayment: (p) => setPayments((prev) => [...prev, p]),
       onClosed: setClosed,
-      onSwept: setSwept,
+      onSwept: () => {},
+      onSummary: setSummary,
       onError: setError,
     });
     session.current = s;
-    void s.start(prompt, capWei);
+    void s.start(prompt, askCap);
   }
 
   return (
@@ -117,9 +163,9 @@ export default function Home() {
             href={explorerAddress(wallet.address)}
             target="_blank"
             rel="noreferrer"
-            className="rounded-full border border-line bg-panel px-4 py-2 font-mono text-sm"
+            className={`rounded-full border bg-panel px-4 py-2 font-mono text-sm ${wrongChain ? "border-amber-400/60" : "border-line"}`}
           >
-            {wallet.address.slice(0, 6)}…{wallet.address.slice(-4)} · Monad Testnet
+            {short(wallet.address)} · {wrongChain ? "Wrong network" : "Monad Testnet"}
           </a>
         ) : (
           <button onClick={onConnect} className="rounded-full bg-monad px-5 py-2 font-medium text-white hover:bg-monad/85">
@@ -127,6 +173,18 @@ export default function Home() {
           </button>
         )}
       </header>
+
+      {wrongChain && (
+        <div className="mt-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-400/40 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+          <span>
+            Your wallet is on another network. Sip402 runs on Monad Testnet.
+            {active && " The current session keeps running: its session key talks to Monad directly."}
+          </span>
+          <button onClick={onSwitchNetwork} className="rounded-lg bg-amber-400/20 px-3 py-1.5 font-medium hover:bg-amber-400/30">
+            Switch to Monad Testnet
+          </button>
+        </div>
+      )}
 
       {error && (
         <div className="mt-6 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>
@@ -184,7 +242,7 @@ export default function Home() {
               ) : (
                 <button
                   onClick={onAsk}
-                  disabled={!wallet || !info || active || !prompt.trim()}
+                  disabled={!wallet || !info || active || wrongChain || !prompt.trim()}
                   className="rounded-xl bg-monad px-6 py-3 font-semibold text-white hover:bg-monad/85 disabled:opacity-40"
                 >
                   Ask
@@ -215,7 +273,7 @@ export default function Home() {
             {phase !== "idle" && (
               <div className="mb-4 flex items-center gap-2 text-sm">
                 {active && <span className="h-2 w-2 animate-pulse rounded-full bg-monad" />}
-                <span className="font-medium">{PHASE_LABEL[phase]}</span>
+                <span className="font-medium">{phase === "done" && closed ? END_LABEL[closed.reason] : PHASE_LABEL[phase]}</span>
                 {detail && <span className="text-muted">· {detail}</span>}
                 {total > 0 && (
                   <span className="ml-auto font-mono text-muted">
@@ -254,35 +312,44 @@ export default function Home() {
             )}
 
             {closed && (
-              <div className="mt-6 rounded-xl border border-line bg-background/60 p-4 text-sm">
-                <div className="font-medium">
-                  Paid for {closed.chunksPaid} chunk{closed.chunksPaid === 1 ? "" : "s"} ({closed.reason})
-                </div>
-                <div className="mt-1 text-muted">
-                  Refunded{" "}
-                  <a href={explorerTx(closed.hash)} target="_blank" rel="noreferrer" className="font-mono text-foreground underline">
-                    {formatEther(closed.refundWei)} MON
-                  </a>{" "}
-                  unspent cap.
-                  {swept && (
-                    <>
-                      {" "}
-                      Returned{" "}
-                      <a href={explorerTx(swept.hash)} target="_blank" rel="noreferrer" className="font-mono text-foreground underline">
-                        {Number(formatEther(swept.amountWei)).toFixed(4)} MON
-                      </a>{" "}
-                      leftover gas allowance.
-                    </>
-                  )}
-                </div>
+              <div
+                className={`mt-6 rounded-xl border px-4 py-3 text-sm ${
+                  closed.reason === "completed" ? "border-monad/50 bg-monad/10" : "border-line bg-background/60"
+                }`}
+              >
+                <span className="font-medium">{END_LABEL[closed.reason]}.</span>{" "}
+                <span className="text-muted">
+                  {closed.reason === "completed"
+                    ? `You read the whole answer and paid for all ${closed.chunksPaid} chunks.`
+                    : `You paid for the ${closed.chunksPaid} chunk${closed.chunksPaid === 1 ? "" : "s"} you read; the rest of the cap was refunded.`}
+                  {!summary && " Returning leftover gas…"}
+                </span>
               </div>
             )}
+            {summary && <SessionSummary summary={summary} />}
           </div>
         </section>
 
         <aside className="space-y-4">
           <div className="rounded-2xl border border-line bg-panel p-5">
             <Glass spentWei={spentWei} capWei={capWei} />
+            {owner && phase !== "idle" && (
+              <p className="mt-3 text-center text-xs text-muted">
+                Session owner{" "}
+                <a href={explorerAddress(owner)} target="_blank" rel="noreferrer" className="font-mono underline">
+                  {short(owner)}
+                </a>{" "}
+                · refunds and leftover gas go here
+              </p>
+            )}
+            {owner && active && wallet?.address !== owner && (
+              <p className="mt-2 rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs text-amber-100">
+                {wallet
+                  ? `Your wallet switched to ${short(wallet.address)}. `
+                  : "Your wallet disconnected. "}
+                This session keeps running on its session key and still belongs to {short(owner)}; the refund goes there.
+              </p>
+            )}
             {opened && (
               <p className="mt-3 text-center text-xs text-muted">
                 Session{" "}

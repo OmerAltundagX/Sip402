@@ -37,7 +37,7 @@ export function Metrics({ payments }: { payments: Payment[] }) {
           hint={`last ${confirm.at(-1)!.toFixed(0)} ms · send → receipt`}
         />
         <Stat label="Chunk price" value={`${formatMon(price)} MON`} hint="paid to the provider" />
-        <Stat label="Avg network fee" value={`${formatMon(avgFee)} MON`} hint="gasUsed × gas price, from receipts" />
+        <Stat label="Avg network fee" value={`${formatMon(avgFee)} MON`} hint="gas limit × gas price (Monad charges the limit)" />
       </div>
 
       <div className="rounded-xl border border-line bg-background/60 p-3">

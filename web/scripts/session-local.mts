@@ -23,7 +23,8 @@ process.env.NEXT_PUBLIC_RPC_URL = RPC;
 (globalThis as { EventSource?: unknown }).EventSource = EventSource;
 
 const { monadTestnet } = await import("@sip402/shared/monad");
-const { fetchProviderInfo, SipSession } = await import("../lib/session");
+const { fetchProviderInfo, SipSession, walletNetCost } = await import("../lib/session");
+type Summary = import("../lib/session").SessionSummary;
 
 const transport = http(RPC);
 const reader = createPublicClient({ chain: monadTestnet, transport });
@@ -44,6 +45,8 @@ let swept = 0n;
 let paused = false;
 let expired = false;
 let paidAtResume: number | undefined;
+let reason: string | undefined;
+let summary: Summary | undefined;
 await new Promise<void>((resolve, reject) => {
   const session = new SipSession(wallet, payer, info, {
     onPhase: (phase, detail) => {
@@ -80,11 +83,15 @@ await new Promise<void>((resolve, reject) => {
     },
     onClosed: (c) => {
       refund = c.refundWei;
+      reason = c.reason;
       console.log(`closed: ${c.chunksPaid} paid, refund ${formatEther(c.refundWei)} MON (${c.reason})`);
     },
     onSwept: (s) => {
       swept = s?.amountWei ?? 0n;
       console.log(`swept: ${s ? formatEther(s.amountWei) : "nothing"} MON`);
+    },
+    onSummary: (s) => {
+      summary = s;
     },
     onError: (m) => reject(new Error(m)),
   });
@@ -105,6 +112,21 @@ if (RESUME_AFTER_MS !== undefined) {
 if (EXPECT_EXPIRED) check(expired, "stream did not expire");
 check(refund === cap - BigInt(paid) * info.pricePerChunk, "refund mismatch");
 check(swept > 0n, "expected a sweep");
+
+const cancelled = STOP_AFTER ?? STOP_IN_FLIGHT ?? CANCEL_AFTER_MS ?? (EXPECT_EXPIRED ? 1 : undefined);
+const expectReason = cancelled !== undefined ? "cancelled" : paid < total ? "cap" : "completed";
+check(reason === expectReason, `expected end reason ${expectReason}, got ${reason}`);
+
+// The summary must account for every wei: the payer's real balance change equals its net cost.
+check(summary !== undefined, "no session summary");
+const s = summary!;
+console.log(
+  `summary: deposit ${formatEther(s.depositWei)}, provider ${formatEther(s.paidToProviderWei)}, fees ${formatEther(s.fees.totalWei)}, ` +
+    `refund ${formatEther(s.refundWei)}, swept ${formatEther(s.sweptWei)}, dust ${formatEther(s.dustWei)}, net ${formatEther(s.netCostWei)}`,
+);
+check(s.chunksPaid === paid && s.refundWei === refund && s.sweptWei === swept, "summary disagrees with session events");
+check(walletNetCost(s) === s.netCostWei, "summary lines do not add up");
+check(s.netCostWei === net, `summary net cost ${formatEther(s.netCostWei)} != payer balance change ${formatEther(net)}`);
 // Net cost = content + all gas; the gas allowance must have come back.
 const content = BigInt(paid) * info.pricePerChunk;
 check(net >= content && net <= content + parseEther("0.05"), `unexpected net cost ${formatEther(net)}`);

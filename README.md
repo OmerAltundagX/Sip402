@@ -59,7 +59,7 @@ npm run server   # terminal 1
 npm run web      # terminal 2, then open http://localhost:3000
 ```
 
-Connect an injected wallet (MetaMask, Rabby etc.), pick a question and a spending cap, and press **Ask**. Use **Pause**, **Resume** and **Cancel** while it streams. The wallet signs only `openSession`; an in-memory session key signs every `pay()`, the `close()` and a final sweep that returns the unused gas allowance. Live metrics show measured send-to-receipt time on Monad next to a labeled 12 s-per-block Ethereum estimate.
+Connect an injected wallet (MetaMask, Rabby etc.), pick a question and a spending cap, and press **Ask**. Use **Pause**, **Resume** and **Cancel** while it streams. The wallet signs only `openSession`; an in-memory session key signs every `pay()`, the `close()` and a final sweep that returns the unused gas allowance. Live metrics show measured send-to-receipt time on Monad next to a labeled 12 s-per-block Ethereum estimate. When a session ends, a summary shows where every wei went (deposit, paid to provider, network fees, refund, returned gas, net cost) with links to each transaction. Account and network switches in the wallet are picked up live; a running session keeps belonging to the account that opened it.
 
 Monad specifics handled in `web/lib/session.ts`:
 
