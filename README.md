@@ -2,84 +2,124 @@
 
 **Pay for AI by the sip.**
 
-Sip402 streams an AI answer chunk by chunk and settles each chunk on Monad before the next one is sent. Pause or cancel at any moment and you only pay for what you read; the rest is refunded.
+Sip402 streams an AI answer chunk by chunk and settles every chunk on Monad before the next one is sent. You approve one spending cap in your wallet; a temporary session key then pays for each ~10-word "sip" as you read it. Pause, resume or cancel at any moment: you pay only for the sips you read, the unspent cap is refunded by the contract, and leftover gas is returned to your wallet.
+
+## Live demo
+
+**https://sip402-one.vercel.app**
+
+- Network: Monad Testnet. Use an injected wallet such as Rabby, funded with testnet MON from the Monad faucet.
+- Recommended for a first try: the **Fast** tier with **up to 10 sips**.
+- The provider server runs on a free tier and may take ~30–60 s to wake up on first use.
+
+Demo video: _coming soon_
+
+## The problem
+
+AI is paid up front: monthly subscriptions or prepaid credits. You pay the same whether the answer is brilliant or useless, and two agents that have never met have no way to set up billing between them at all.
 
 ## How it works
 
-1. **Open session** — the user deposits a spending cap and authorizes a temporary session key (one wallet popup).
-2. **Stream** — the provider sends a chunk; the session key calls `pay()` and the chunk price goes to the provider.
-3. **Verify** — the provider checks the `ChunkPaid` event on-chain, then sends the next chunk.
-4. **Close** — on Cancel or when the answer ends, `close()` refunds the unspent balance.
+1. **Open a session.** One wallet approval calls `openSession`, which deposits a spending cap plus a gas allowance and authorizes a temporary session key that lives only in the browser's memory.
+2. **Stream.** The provider streams the answer over SSE in chunks of about 10 words.
+3. **Pay per sip.** For each chunk, the session key calls `pay()` on Monad. The provider verifies the `ChunkPaid` event on-chain and only then sends the next chunk.
+4. **Pause / Resume / Cancel.** Pause stops payments while the session stays open; Resume continues the same answer without a wallet prompt; Cancel ends it.
+5. **Close and sweep.** `close()` refunds the unspent cap to the payer, then a sweep sends the session key's leftover gas allowance back to the wallet.
 
-While streaming you can **Pause** (no further payments; the session stays open on-chain), **Resume** (continue the same answer, no wallet popup) or **Cancel** (close, refund and return the unused gas allowance).
+```mermaid
+sequenceDiagram
+    participant U as User (wallet)
+    participant B as Browser (session key)
+    participant P as Provider server
+    participant C as Sip402 contract (Monad)
 
-Each side's risk is capped at one chunk.
+    U->>C: openSession(provider, price, sessionKey, gasAllowance) + cap
+    C-->>B: gas allowance to the session key
+    B->>P: POST /ask (signed by the session key)
+    P->>C: read session (open, provider, price)
+    P-->>B: SSE chunk 1
+    loop every sip
+        B->>C: pay(sessionId)
+        C-->>P: price to the provider, ChunkPaid event
+        B->>P: POST /paid (tx hash)
+        P->>C: verify ChunkPaid for this chunk
+        P-->>B: SSE next chunk
+    end
+    B->>C: close(sessionId), unspent cap refunded to the payer
+    B->>U: sweep leftover gas allowance
+```
+
+## Why Monad
+
+Payment is tied to the content flow, so every sip waits for a confirmed transaction. That only feels like streaming if confirmations are faster than reading.
+
+- Measured send-to-receipt time in our testnet sessions averaged about 330–360 ms (one run averaged 458 ms on the public RPC).
+- A 9-payment session spends about 3 s waiting for confirmations, versus about 108 s estimated with one payment per 12 s Ethereum block.
+
+The app measures this live in the browser and shows it next to a labeled 12-second-block Ethereum estimate.
+
+## Features
+
+- **Price tiers**: Fast (0.0001 MON per sip), Smart (0.0003) and Pro (0.0005), locked while a session is active.
+- **Sip cap**: choose up to 10, 20 or 30 sips; the deposit is sips × tier price.
+- **Live payment feed**: one row per sip with amount, confirmation time and a MonadVision link, plus a pending row while a payment is in flight.
+- **Session summary**: deposit, opening fee, refund, returned gas and net cost, broken down into provider payments, network fees and dust, each linked to its transaction. The numbers are checked to add up.
+- **Metrics panel**: payment count, average and last confirmation time, chunk price, average network fee, and the Ethereum speed comparison.
+- **Agent mode**: `npm run agent` runs an autonomous agent that opens a session with its own wallet, pays per sip from the terminal and stops as soon as the answer contains what it needs (`--stop-when "<keyword>"`) or the sip cap is reached. See [NOTES.md](NOTES.md).
+
+## Architecture
+
+- **Contract** (Foundry, Solidity): `openSession`, `pay`, `close` and `remaining`. Sessions are packed into three storage slots; `pay()` only bumps a counter and forwards the chunk price to the provider.
+- **Provider server** (Node, Express): checks the session on-chain and the session key's signature, splits the answer into chunks, streams them over SSE and releases each next chunk only after verifying its `ChunkPaid` event. Paused streams are kept for 5 minutes of inactivity.
+- **Frontend** (Next.js, viem): wallet connection, session key, per-sip payments via `eth_sendRawTransactionSync`, Pause/Resume/Cancel, close, sweep, live feed, metrics and summary.
+- **shared/**: chain config and measured gas limits, the contract ABI, the request-signing format, and an RPC transport that retries the public RPC's rate-limit errors with exponential backoff (with an optional fallback RPC).
+
+```
+src/            Sip402.sol
+test/           Forge tests
+script/         Deploy script, ABI export, local end-to-end test runner
+server/         Provider server
+web/            Next.js app
+shared/         Code shared by server, web and agent
+agent/          Agent mode demo
+```
 
 ## Contract
 
-`Sip402` on Monad Testnet (chain 10143): [`0x0654aB49C0AF16c0E660E84A8A879e497095a6D8`](https://testnet.monadvision.com/address/0x0654aB49C0AF16c0E660E84A8A879e497095a6D8) (verified)
+`Sip402` on Monad Testnet (chain 10143): [`0x0654aB49C0AF16c0E660E84A8A879e497095a6D8`](https://testnet.monadvision.com/address/0x0654aB49C0AF16c0E660E84A8A879e497095a6D8), verified on MonadVision.
 
-```shell
-forge test
-forge script script/Deploy.s.sol --rpc-url monad --account <keystore> --broadcast
-./script/export-abi.sh   # regenerates shared/sip402Abi.ts after contract changes
-```
-
-See [DEPLOY.md](DEPLOY.md) for the Render (server) and Vercel (web) settings.
-
-## Repository layout
-
-| Path | What |
-| --- | --- |
-| `src/`, `test/`, `script/` | Foundry contract, tests, deploy script |
-| `shared/` | Chain config, gas limits, ABI and protocol shared by server and web |
-| `server/` | Provider: Node + Express, streams chunks over SSE, verifies payments on-chain |
-| `web/` | Next.js + viem frontend |
-
-## Provider server
+## Run locally
 
 ```shell
 npm install
 cp server/.env.example server/.env   # set PROVIDER_ADDRESS
-npm run server
+npm run server                       # provider on http://localhost:3001
+npm run web                          # app on http://localhost:3000
 ```
 
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /info` | Contract, provider address and price per chunk |
-| `POST /ask` `{ sessionId, prompt, signature }` | Checks the session on-chain and the session key's signature, returns a stream token |
-| `GET /stream/:token` | SSE: `chunk { index, text, total }`, then `done`; `expired` if dropped for inactivity. Reconnecting replays delivered chunks |
-| `POST /paid` `{ token, txHash }` | Verifies the `ChunkPaid` event for the current chunk, then releases the next one |
-| `POST /end` `{ token }` | Client is done with the stream |
-
-A paused stream is kept for `STREAM_IDLE_TIMEOUT_MS` (default 5 minutes) without a payment, then dropped. The deposit stays safe in the contract; the client offers Cancel to close the session and get the refund.
-
-## Web app
+Tests:
 
 ```shell
-npm run server   # terminal 1
-npm run web      # terminal 2, then open http://localhost:3000
+forge test                 # contract tests
+./script/e2e-local.sh      # end-to-end cases against a local anvil chain
 ```
 
-Connect an injected wallet (MetaMask, Rabby etc.), pick a question and a spending cap, and press **Ask**. Use **Pause**, **Resume** and **Cancel** while it streams. The wallet signs only `openSession`; an in-memory session key signs every `pay()`, the `close()` and a final sweep that returns the unused gas allowance. Live metrics show measured send-to-receipt time on Monad next to a labeled 12 s-per-block Ethereum estimate. When a session ends, a summary shows where every wei went (deposit, paid to provider, network fees, refund, returned gas, net cost) with links to each transaction. Account and network switches in the wallet are picked up live; a running session keeps belonging to the account that opened it.
+Agent mode: see [NOTES.md](NOTES.md). Deployment (Render for the server, Vercel for the web app): see [DEPLOY.md](DEPLOY.md).
 
-Monad specifics handled in `web/lib/session.ts`:
+## Design trade-offs and roadmap
 
-- **Gas limit billing**: `pay()` and `close()` gas is estimated per session (+10%), because Monad prices cold storage per page and a session whose slots straddle a page boundary costs 8,000 more gas. `shared/monad.ts` holds the worst-case fallbacks.
-- **Reserve balance rule**: the session key waits 3 blocks after being funded before its first `pay()`, and 3 blocks after `close()` before sweeping its leftover balance.
-- **Latency**: payments use `eth_sendRawTransactionSync`, which returns the receipt in one round trip, with a fallback to send and poll.
-- **Nonces**: one payment in flight at a time, with a local nonce counter that is resynced from the chain on errors.
+One on-chain transaction per sip keeps both sides' risk to at most one unpaid chunk and needs no payment channel. The cost is that network fees dominate on testnet: at Monad's 100 gwei minimum base fee, a `pay()` needs about 55k gas, which is far more than a 0.0001 MON sip.
 
-### Real testnet session
+Next:
 
-`web/scripts/session-testnet.mts` runs one session on Monad testnet with a throwaway payer key that lives only in memory: fund the address it prints, and it opens a session, cancels after `STOP_AFTER` sips, prints the money breakdown and sends everything left to `RETURN_TO`.
+- Signed off-chain vouchers per sip with a single on-chain settlement, so fees no longer scale with the number of sips.
+- Plug in a real streaming LLM as the provider.
 
-### Local end-to-end test
+## Limitations
 
-Runs every case against a local anvil chain (chain ID 10143, so anvil applies Monad's gas rules) without spending testnet MON. It starts anvil and the provider server on port 3901 and cleans up afterwards:
+- The AI provider is mocked: answers are pre-written and chosen by keywords in the question.
+- The tiers differ only in price and label, not in model quality.
 
-```shell
-./script/e2e-local.sh
-```
+---
 
-Cases: all three price tiers, an off-tier price refused by the provider, full answer, cancel after n payments, cancel while a payment is in flight, spending cap reached, a session whose storage straddles a page boundary, pause then resume, pause then cancel, and the paused-stream idle timeout (with a 3 s timeout).
+Built at Monad Blitz Ankara, 24 October 2026.
