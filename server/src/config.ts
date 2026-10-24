@@ -25,6 +25,8 @@ function parseTiers(spec: string): PriceTier[] {
 export const config = {
   port: Number(process.env.PORT ?? 3001),
   rpcUrl: process.env.RPC_URL ?? "https://testnet-rpc.monad.xyz",
+  /** Optional second RPC, used when the primary still fails after its rate-limit retries. */
+  rpcUrlFallback: process.env.RPC_URL_FALLBACK || undefined,
   contract: getAddress(process.env.CONTRACT_ADDRESS ?? SIP402_ADDRESS),
   provider: getAddress(required("PROVIDER_ADDRESS")),
   tiers: parseTiers(process.env.PRICE_TIERS ?? "fast:Fast:0.0001,smart:Smart:0.0003,pro:Pro:0.0005"),

@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { EventSource } from "eventsource";
-import { createWalletClient, custom, formatEther, http, type Hex } from "viem";
+import { createWalletClient, custom, formatEther, type Hex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 const ENV_FILE = join(dirname(fileURLToPath(import.meta.url)), ".env");
@@ -84,7 +84,8 @@ const { fetchProviderInfo, publicClient, SipSession } = await import("../web/lib
 type Summary = import("../web/lib/session").SessionSummary;
 
 // A wallet that signs exactly the gas and fees SipSession requests with the agent's key.
-const rpc = http(process.env.NEXT_PUBLIC_RPC_URL || monadTestnet.rpcUrls.default.http[0])({ chain: monadTestnet });
+const { rpcTransport } = await import("@sip402/shared/rpc");
+const rpc = rpcTransport(process.env.NEXT_PUBLIC_RPC_URL, process.env.RPC_URL_FALLBACK)({ chain: monadTestnet });
 const wallet = createWalletClient({
   chain: monadTestnet,
   transport: custom({

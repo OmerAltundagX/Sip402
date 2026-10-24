@@ -28,7 +28,8 @@ const STOP_AFTER = Number(process.env.STOP_AFTER ?? 9);
 const FUND_TIMEOUT_MS = 15 * 60_000;
 
 const payer = privateKeyToAccount(generatePrivateKey());
-const rpc = http(monadTestnet.rpcUrls.default.http[0])({ chain: monadTestnet });
+const { rpcTransport } = await import("@sip402/shared/rpc");
+const rpc = rpcTransport()({ chain: monadTestnet });
 
 // A minimal injected-style wallet: signs exactly the gas and fees SipSession asks for.
 const wallet = createWalletClient({

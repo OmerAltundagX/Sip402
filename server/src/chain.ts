@@ -1,12 +1,14 @@
-import { createPublicClient, http, parseEventLogs, type Address, type Hash } from "viem";
+import { createPublicClient, parseEventLogs, type Address, type Hash } from "viem";
 import { monadTestnet } from "@sip402/shared/monad";
+import { rpcTransport } from "@sip402/shared/rpc";
 import { sip402Abi } from "@sip402/shared/sip402Abi";
 import { config } from "./config";
 
 export const client = createPublicClient({
   chain: monadTestnet,
-  transport: http(config.rpcUrl),
-  pollingInterval: 50,
+  // Retries rate-limited reads instead of refusing the session or a payment.
+  transport: rpcTransport(config.rpcUrl, config.rpcUrlFallback),
+  pollingInterval: 200,
 });
 
 export type OnchainSession = {
@@ -41,7 +43,7 @@ export async function verifyChunkPayment(
   // The payer already waited for the receipt, so it is usually available on the first call.
   const receipt = await client
     .getTransactionReceipt({ hash: txHash })
-    .catch(() => client.waitForTransactionReceipt({ hash: txHash, pollingInterval: 50, timeout: 10_000 }))
+    .catch(() => client.waitForTransactionReceipt({ hash: txHash, pollingInterval: 200, timeout: 15_000 }))
     .catch(() => null);
 
   if (!receipt) return { ok: false, reason: "transaction not found" };

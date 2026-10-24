@@ -1,7 +1,6 @@
 import {
   createPublicClient,
   createWalletClient,
-  http,
   parseEventLogs,
   type Address,
   type Hash,
@@ -12,7 +11,8 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { BASE_FEE_HEADROOM_PCT, GAS_BUFFER_PCT, GAS_LIMITS, monadTestnet } from "@sip402/shared/monad";
 import { askMessage } from "@sip402/shared/protocol";
 import { sip402Abi } from "@sip402/shared/sip402Abi";
-import { RPC_URL, SERVER_URL } from "./config";
+import { rpcTransport } from "@sip402/shared/rpc";
+import { RPC_URL, RPC_URL_FALLBACK, SERVER_URL } from "./config";
 
 /** Monad's reserve-balance rule looks back this many blocks. */
 const RESERVE_LAG_BLOCKS = 3n;
@@ -20,8 +20,8 @@ const TRANSFER_GAS = GAS_LIMITS.transfer;
 
 export const publicClient = createPublicClient({
   chain: monadTestnet,
-  transport: http(RPC_URL),
-  pollingInterval: 50,
+  transport: rpcTransport(RPC_URL, RPC_URL_FALLBACK),
+  pollingInterval: 200,
 });
 
 export type PriceTier = { id: string; label: string; pricePerChunk: bigint };
@@ -118,7 +118,8 @@ const withBuffer = (gas: bigint) => (gas * (100n + GAS_BUFFER_PCT) + 99n) / 100n
 
 async function waitForBlock(target: bigint) {
   while ((await publicClient.getBlockNumber({ cacheTime: 0 })) < target) {
-    await new Promise((r) => setTimeout(r, 100));
+    // Monad blocks are ~400 ms apart; polling faster only burns rate limit.
+    await new Promise((r) => setTimeout(r, 300));
   }
 }
 
@@ -151,7 +152,7 @@ const isUnsupportedMethod = (err: unknown) =>
  */
 export class SipSession {
   private readonly sessionKey = privateKeyToAccount(generatePrivateKey());
-  private readonly keyWallet = createWalletClient({ chain: monadTestnet, transport: http(RPC_URL), account: this.sessionKey });
+  private readonly keyWallet = createWalletClient({ chain: monadTestnet, transport: rpcTransport(RPC_URL, RPC_URL_FALLBACK), account: this.sessionKey });
   private sessionId = 0n;
   private token = "";
   private nonce = 0;
@@ -456,7 +457,7 @@ export class SipSession {
     try {
       const hash = await this.keyWallet.writeContract(request);
       this.nonce++;
-      return await publicClient.waitForTransactionReceipt({ hash, pollingInterval: 50 });
+      return await publicClient.waitForTransactionReceipt({ hash, pollingInterval: 100 });
     } catch (err) {
       await this.resyncNonce();
       throw err;
@@ -546,7 +547,7 @@ export class SipSession {
       maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
     });
     this.nonce++;
-    const receipt = await publicClient.waitForTransactionReceipt({ hash, pollingInterval: 50 });
+    const receipt = await publicClient.waitForTransactionReceipt({ hash });
     const feeWei = chargedFee(TRANSFER_GAS, receipt);
     return { tx: hash, sweptWei: receipt.status === "success" ? value : 0n, feeWei };
   }

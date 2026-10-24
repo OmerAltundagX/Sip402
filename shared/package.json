@@ -5,7 +5,8 @@
   "exports": {
     "./monad": "./monad.ts",
     "./protocol": "./protocol.ts",
-    "./sip402Abi": "./sip402Abi.ts"
+    "./sip402Abi": "./sip402Abi.ts",
+    "./rpc": "./rpc.ts"
   },
   "peerDependencies": {
     "viem": "^2"
