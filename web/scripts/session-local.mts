@@ -47,6 +47,7 @@ let expired = false;
 let paidAtResume: number | undefined;
 let reason: string | undefined;
 let summary: Summary | undefined;
+let pendingSip: number | undefined;
 await new Promise<void>((resolve, reject) => {
   const session = new SipSession(wallet, payer, info, {
     onPhase: (phase, detail) => {
@@ -74,7 +75,13 @@ await new Promise<void>((resolve, reject) => {
       if (c.index + 1 === STOP_IN_FLIGHT) setTimeout(() => session.cancel(), 100);
       if (c.index + 1 === PAUSE_AT) setTimeout(() => session.pause(), 100);
     },
+    onPaymentStart: (index) => {
+      if (pendingSip !== undefined) reject(new Error(`payment ${index + 1} started while ${pendingSip + 1} pending`));
+      pendingSip = index;
+    },
     onPayment: (p) => {
+      if (pendingSip !== p.index) reject(new Error(`payment ${p.index + 1} confirmed without a pending event`));
+      pendingSip = undefined;
       paid++;
       console.log(`  paid #${p.index + 1}: ${p.confirmMs.toFixed(0)} ms, verify ${p.verifyMs} ms, fee ${formatEther(p.feeWei)}`);
       if (paid === STOP_AFTER) session.cancel();
@@ -107,7 +114,9 @@ if (expectPaid !== undefined) check(paid === expectPaid, `expected ${expectPaid}
 if (PAUSE_AT !== undefined) check(paused, "session never paused");
 if (RESUME_AFTER_MS !== undefined) {
   check(paidAtResume === PAUSE_AT, `expected ${PAUSE_AT} payments at resume, got ${paidAtResume}`);
-  check(paid === Math.min(total, Number(cap / info.pricePerChunk)), `expected the full answer after resume, got ${paid}`);
+  if (STOP_AFTER === undefined) {
+    check(paid === Math.min(total, Number(cap / info.pricePerChunk)), `expected the full answer after resume, got ${paid}`);
+  }
 }
 if (EXPECT_EXPIRED) check(expired, "stream did not expire");
 check(refund === cap - BigInt(paid) * info.pricePerChunk, "refund mismatch");

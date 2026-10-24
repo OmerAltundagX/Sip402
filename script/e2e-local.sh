@@ -80,6 +80,8 @@ run web scripts/session-local.mts STOP_IN_FLIGHT=1
 run web scripts/session-local.mts STOP_IN_FLIGHT=5
 run web scripts/session-local.mts PAUSE_AT=3 RESUME_AFTER_MS=1500
 run web scripts/session-local.mts PAUSE_AT=4 CANCEL_AFTER_MS=1500
+# The full demo flow: start, pause, resume, cancel, refund.
+run web scripts/session-local.mts PAUSE_AT=3 RESUME_AFTER_MS=1500 STOP_AFTER=6
 
 start_server STREAM_IDLE_TIMEOUT_MS=3000
 run web scripts/session-local.mts PAUSE_AT=2 RESUME_AFTER_MS=1500

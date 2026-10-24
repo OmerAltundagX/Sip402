@@ -5,7 +5,7 @@ import { formatEther, parseEther, type Address, type Hash } from "viem";
 import { explorerAddress, explorerTx, monadTestnet } from "@sip402/shared/monad";
 import { Glass } from "@/components/Glass";
 import { Metrics } from "@/components/Metrics";
-import { PaymentLog } from "@/components/PaymentLog";
+import { LivePayments } from "@/components/LivePayments";
 import { SessionSummary } from "@/components/SessionSummary";
 import {
   fetchProviderInfo,
@@ -63,6 +63,8 @@ export default function Home() {
   const [opened, setOpened] = useState<Opened>();
   const [closed, setClosed] = useState<Closed>();
   const [summary, setSummary] = useState<Summary>();
+  /** Chunk whose pay() is in flight, for the live feed's pending row. */
+  const [pendingSip, setPendingSip] = useState<number>();
   const [error, setError] = useState<string>();
   const session = useRef<SipSession>(null);
 
@@ -121,6 +123,7 @@ export default function Home() {
     setOpened(undefined);
     setClosed(undefined);
     setSummary(undefined);
+    setPendingSip(undefined);
     setError(undefined);
     setOwner(wallet.address);
     setSessionCap(askCap);
@@ -129,6 +132,8 @@ export default function Home() {
       onPhase: (p, d) => {
         setPhase(p);
         setDetail(d);
+        // An in-flight payment still finishes while paused; any other end clears it.
+        if (p !== "streaming" && p !== "paused") setPendingSip(undefined);
       },
       onOpened: setOpened,
       onChunk: ({ index, text, total }) => {
@@ -139,7 +144,11 @@ export default function Home() {
           return next;
         });
       },
-      onPayment: (p) => setPayments((prev) => [...prev, p]),
+      onPaymentStart: setPendingSip,
+      onPayment: (p) => {
+        setPendingSip(undefined);
+        setPayments((prev) => [...prev, p]);
+      },
       onClosed: setClosed,
       onSwept: () => {},
       onSummary: setSummary,
@@ -328,6 +337,21 @@ export default function Home() {
             )}
             {summary && <SessionSummary summary={summary} />}
           </div>
+
+          <div className="rounded-2xl border border-line bg-panel p-5">
+            <div className="mb-3 flex items-baseline justify-between">
+              <h2 className="text-sm font-medium">Live payments</h2>
+              {payments.length > 0 && (
+                <span className="font-mono text-xs text-muted">
+                  {payments.length} sip{payments.length === 1 ? "" : "s"} settled on Monad
+                </span>
+              )}
+            </div>
+            <LivePayments
+              payments={payments}
+              pending={pendingSip !== undefined && info ? { index: pendingSip, priceWei: info.pricePerChunk } : undefined}
+            />
+          </div>
         </section>
 
         <aside className="space-y-4">
@@ -365,12 +389,6 @@ export default function Home() {
             <h2 className="mb-3 text-sm font-medium">Live metrics</h2>
             <Metrics payments={payments} />
           </div>
-          {payments.length > 0 && (
-            <div className="rounded-2xl border border-line bg-panel p-5">
-              <h2 className="mb-3 text-sm font-medium">Payments</h2>
-              <PaymentLog payments={payments} />
-            </div>
-          )}
         </aside>
       </div>
     </main>

@@ -84,6 +84,8 @@ export type SessionEvents = {
   onPhase: (phase: Phase, detail?: string) => void;
   onOpened: (info: { sessionId: bigint; hash: Hash; sessionKey: Address; maxChunks: number; gasAllowanceWei: bigint }) => void;
   onChunk: (chunk: { index: number; text: string; total: number }) => void;
+  /** A pay() for this chunk is about to be sent (UI pending state only). */
+  onPaymentStart?: (index: number) => void;
   onPayment: (payment: Payment) => void;
   onClosed: (info: { hash: Hash; chunksPaid: number; refundWei: bigint; reason: EndReason }) => void;
   onSwept: (info: { hash: Hash; amountWei: bigint } | null) => void;
@@ -335,6 +337,7 @@ export class SipSession {
       void this.finish("cap");
       return;
     }
+    this.events.onPaymentStart?.(index);
 
     const started = performance.now();
     const gasLimit = this.gas.pay;
