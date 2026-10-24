@@ -68,6 +68,10 @@ Monad specifics handled in `web/lib/session.ts`:
 - **Latency**: payments use `eth_sendRawTransactionSync`, which returns the receipt in one round trip, with a fallback to send and poll.
 - **Nonces**: one payment in flight at a time, with a local nonce counter that is resynced from the chain on errors.
 
+### Real testnet session
+
+`web/scripts/session-testnet.mts` runs one session on Monad testnet with a throwaway payer key that lives only in memory: fund the address it prints, and it opens a session, cancels after `STOP_AFTER` sips, prints the money breakdown and sends everything left to `RETURN_TO`.
+
 ### Local end-to-end test
 
 Runs every case against a local anvil chain (chain ID 10143, so anvil applies Monad's gas rules) without spending testnet MON. It starts anvil and the provider server on port 3901 and cleans up afterwards:

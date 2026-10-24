@@ -9,14 +9,14 @@ import {
   type WalletClient,
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { GAS_LIMITS, monadTestnet } from "@sip402/shared/monad";
+import { BASE_FEE_HEADROOM_PCT, GAS_BUFFER_PCT, GAS_LIMITS, monadTestnet } from "@sip402/shared/monad";
 import { askMessage } from "@sip402/shared/protocol";
 import { sip402Abi } from "@sip402/shared/sip402Abi";
 import { RPC_URL, SERVER_URL } from "./config";
 
 /** Monad's reserve-balance rule looks back this many blocks. */
 const RESERVE_LAG_BLOCKS = 3n;
-const TRANSFER_GAS = 21_000n;
+const TRANSFER_GAS = GAS_LIMITS.transfer;
 
 export const publicClient = createPublicClient({
   chain: monadTestnet,
@@ -107,6 +107,15 @@ export async function fetchProviderInfo(): Promise<ProviderInfo> {
   return { contract: body.contract, provider: body.provider, pricePerChunk: BigInt(body.pricePerChunk), tiers };
 }
 
+/** Current base fee + small headroom as the cap, plus the network's suggested priority fee. */
+async function currentFees() {
+  const [block, priority] = await Promise.all([publicClient.getBlock(), publicClient.estimateMaxPriorityFeePerGas()]);
+  const base = block.baseFeePerGas ?? 0n;
+  return { maxFeePerGas: base + (base * BASE_FEE_HEADROOM_PCT) / 100n + priority, maxPriorityFeePerGas: priority };
+}
+
+const withBuffer = (gas: bigint) => (gas * (100n + GAS_BUFFER_PCT) + 99n) / 100n;
+
 async function waitForBlock(target: bigint) {
   while ((await publicClient.getBlockNumber({ cacheTime: 0 })) < target) {
     await new Promise((r) => setTimeout(r, 100));
@@ -122,6 +131,13 @@ const chargedFee = (gasLimit: bigint, receipt: TransactionReceipt) => gasLimit *
 
 const errorMessage = (err: unknown) =>
   err instanceof Error ? ((err as { shortMessage?: string }).shortMessage ?? err.message) : String(err);
+
+/** The node rejected the transaction because the base fee rose above our maxFeePerGas. */
+const isFeeTooLow = (err: unknown) =>
+  err instanceof Error &&
+  /max fee per gas less than block base fee|fee cap less than block base fee|underpriced|maxFeePerGas.*base fee/i.test(
+    `${err.name} ${err.message}`,
+  );
 
 const isUnsupportedMethod = (err: unknown) =>
   err instanceof Error &&
@@ -214,9 +230,7 @@ export class SipSession {
 
   private async open(capWei: bigint) {
     this.events.onPhase("opening", "Confirm the session in your wallet");
-    const block = await publicClient.getBlock();
-    const priority = await publicClient.estimateMaxPriorityFeePerGas();
-    this.fees = { maxFeePerGas: (block.baseFeePerGas ?? 0n) * 2n + priority, maxPriorityFeePerGas: priority };
+    this.fees = await currentFees();
     this.providerEmpty = (await publicClient.getBalance({ address: this.info.provider })) === 0n;
 
     // Gas budget for every possible pay(), the close() and the sweep. Leftovers are swept back.
@@ -228,7 +242,7 @@ export class SipSession {
       TRANSFER_GAS;
     const gasAllowance = gasUnits * this.fees.maxFeePerGas;
 
-    const hash = await this.wallet.writeContract({
+    const openRequest = {
       account: this.payer,
       chain: monadTestnet,
       address: this.info.contract,
@@ -236,8 +250,12 @@ export class SipSession {
       functionName: "openSession",
       args: [this.info.provider, this.info.pricePerChunk, this.sessionKey.address, gasAllowance],
       value: capWei + gasAllowance,
-      gas: GAS_LIMITS.openSession,
-    });
+    } as const;
+    // Explicit tight limit and EIP-1559 fees; some wallets may still apply their own.
+    const openGas = await publicClient
+      .estimateContractGas(openRequest)
+      .then(withBuffer, () => GAS_LIMITS.openSession);
+    const hash = await this.wallet.writeContract({ ...openRequest, gas: openGas, ...this.fees });
     const receipt = await publicClient.waitForTransactionReceipt({ hash });
     if (receipt.status !== "success") throw new Error("openSession reverted");
     this.capWei = capWei;
@@ -270,7 +288,7 @@ export class SipSession {
   }
 
   /**
-   * Gas for this session's pay() or close(), plus 10% headroom. Storage layout makes
+   * Gas for this session's pay() or close(), plus GAS_BUFFER_PCT. Storage layout makes
    * the cost differ between sessions on Monad, so a fixed limit is either wasteful
    * or occasionally too low.
    */
@@ -283,7 +301,7 @@ export class SipSession {
         args: [this.sessionId],
         account: this.sessionKey.address,
       });
-      return (estimate * 110n) / 100n;
+      return withBuffer(estimate);
     } catch {
       return fallback;
     }
@@ -399,6 +417,17 @@ export class SipSession {
 
   /** Sends pay() or close() from the session key and returns its receipt. */
   private async sendFromKey(functionName: "pay" | "close", gas: bigint): Promise<TransactionReceipt> {
+    try {
+      return await this.sendFromKeyOnce(functionName, gas);
+    } catch (err) {
+      // The fee cap has little headroom; if the base fee rose past it, refresh the fees and retry once.
+      if (!isFeeTooLow(err)) throw err;
+      this.fees = await currentFees();
+      return this.sendFromKeyOnce(functionName, gas);
+    }
+  }
+
+  private async sendFromKeyOnce(functionName: "pay" | "close", gas: bigint): Promise<TransactionReceipt> {
     const request = {
       address: this.info.contract,
       abi: sip402Abi,
@@ -498,12 +527,12 @@ export class SipSession {
 
   /** Sends the session key's remaining balance, minus the transfer fee, back to the payer. */
   private async sweep(): Promise<{ tx?: Hash; sweptWei: bigint; feeWei: bigint }> {
-    const [balance, block] = await Promise.all([
+    const [balance, fees] = await Promise.all([
       publicClient.getBalance({ address: this.sessionKey.address }),
-      publicClient.getBlock(),
+      currentFees(),
     ]);
     // Little headroom over the current base fee keeps the uncharged remainder (dust) small.
-    const maxFeePerGas = ((block.baseFeePerGas ?? 0n) * 11n) / 10n + this.fees.maxPriorityFeePerGas;
+    const { maxFeePerGas } = fees;
     const maxFee = TRANSFER_GAS * maxFeePerGas;
     if (balance <= maxFee) return { sweptWei: 0n, feeWei: 0n };
 
@@ -514,7 +543,7 @@ export class SipSession {
       gas: TRANSFER_GAS,
       nonce: this.nonce,
       maxFeePerGas,
-      maxPriorityFeePerGas: this.fees.maxPriorityFeePerGas,
+      maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
     });
     this.nonce++;
     const receipt = await publicClient.waitForTransactionReceipt({ hash, pollingInterval: 50 });
