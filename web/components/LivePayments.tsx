@@ -27,7 +27,7 @@ export function LivePayments({
 
   const rows = payments.slice(-MAX_ROWS).reverse();
   return (
-    <ol ref={list} className="max-h-80 space-y-1.5 overflow-y-auto pr-1 font-mono text-sm">
+    <ol ref={list} className="dark-scroll max-h-80 space-y-1.5 overflow-y-auto pr-1 font-mono text-sm">
       {pending && (
         <li
           key={`pending-${pending.index}`}
