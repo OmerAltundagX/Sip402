@@ -21,7 +21,7 @@ Deploy the server first: the web build needs its URL.
 
 | Name | Required | Value |
 | --- | --- | --- |
-| `NODE_VERSION` | yes | `20` |
+| `NODE_VERSION` | yes | `24` |
 | `PROVIDER_ADDRESS` | yes | Address that receives sip payments |
 | `ALLOWED_ORIGINS` | yes | Vercel production URL, e.g. `https://sip402.vercel.app` (comma-separated for several; add `http://localhost:3000` for local testing) |
 | `PRICE_TIERS` | no | Default `fast:Fast:0.0001,smart:Smart:0.0003,pro:Pro:0.0005` |
@@ -47,7 +47,7 @@ SSE goes through Render's proxy unbuffered: the stream sends `text/event-stream`
 | Install Command | from `web/vercel.json`: `cd .. && npm ci` |
 | Build Command | from `web/vercel.json`: `next build` |
 | Output Directory | default (`.next`) |
-| Node.js Version | 20.x (from `engines` in `web/package.json`) |
+| Node.js Version | 24.x (from `engines` in `web/package.json`) |
 
 `web/next.config.ts` transpiles `@sip402/shared` and traces files from the repo root.
 

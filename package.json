@@ -12,6 +12,6 @@
     "agent": "tsx agent/agent-demo.ts"
   },
   "engines": {
-    "node": "20.x"
+    "node": "24.x"
   }
 }
