@@ -15,10 +15,34 @@ type Stream = {
   paid: number;
   verifying: boolean;
   client?: Response;
+  /** Last /ask, /stream or /paid; a paused stream is dropped after config.streamIdleTimeoutMs. */
+  lastActivity: number;
 };
 
 const streams = new Map<string, Stream>();
 const sessionsInUse = new Set<string>();
+
+function dropStream(token: string) {
+  const stream = streams.get(token);
+  if (!stream) return;
+  stream.client?.end();
+  streams.delete(token);
+  sessionsInUse.delete(stream.sessionId.toString());
+}
+
+// A paused client keeps its stream; nothing is charged while it waits. Streams with no
+// activity for the idle timeout are dropped so abandoned sessions do not pile up.
+setInterval(
+  () => {
+    const now = Date.now();
+    for (const [token, stream] of streams) {
+      if (stream.verifying || now - stream.lastActivity < config.streamIdleTimeoutMs) continue;
+      send(stream, "expired", { idleMs: now - stream.lastActivity, paid: stream.paid });
+      dropStream(token);
+    }
+  },
+  Math.min(config.streamIdleTimeoutMs / 5, 5_000),
+).unref();
 
 function send(stream: Stream, event: string, data: unknown) {
   stream.client?.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -64,13 +88,16 @@ app.post("/ask", async (req, res) => {
 
   const chunks = toChunks(answerFor(prompt), config.wordsPerChunk);
   const token = randomUUID();
-  streams.set(token, { sessionId: BigInt(sessionId), chunks, paid: 0, verifying: false });
+  streams.set(token, { sessionId: BigInt(sessionId), chunks, paid: 0, verifying: false, lastActivity: Date.now() });
   sessionsInUse.add(sessionId);
 
   res.json({ token, totalChunks: chunks.length, affordableChunks: (session.deposit / session.pricePerChunk).toString() });
 });
 
-/** Server-sent events: `chunk` { index, text, total } and `done` { paid }. */
+/**
+ * Server-sent events: `chunk` { index, text, total }, `done` { paid }, and `expired` { idleMs, paid }
+ * when the stream is dropped for inactivity. Reconnecting replays the chunks delivered so far.
+ */
 app.get("/stream/:token", (req, res) => {
   const stream = streams.get(req.params.token);
   if (!stream) return res.status(404).end();
@@ -82,17 +109,25 @@ app.get("/stream/:token", (req, res) => {
     "X-Accel-Buffering": "no",
   });
   stream.client = res;
+  stream.lastActivity = Date.now();
 
   // The first chunk is free to read; each later chunk is sent only after the previous one is paid.
   for (let i = 0; i <= Math.min(stream.paid, stream.chunks.length - 1); i++) sendChunk(stream, i);
   if (stream.paid === stream.chunks.length) send(stream, "done", { paid: stream.paid });
 
   const heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 15_000);
+  // A dropped connection keeps the stream so the client can reconnect; /end or the idle timeout removes it.
   req.on("close", () => {
     clearInterval(heartbeat);
-    streams.delete(req.params.token);
-    sessionsInUse.delete(stream.sessionId.toString());
+    if (stream.client === res) stream.client = undefined;
   });
+});
+
+/** Body: { token }. The client is done with the stream (answer complete or session cancelled). */
+app.post("/end", (req, res) => {
+  const { token } = req.body ?? {};
+  if (typeof token === "string") dropStream(token);
+  res.json({ ok: true });
 });
 
 /** Body: { token, txHash }. Verifies payment for the current chunk, then releases the next one. */
@@ -105,6 +140,7 @@ app.post("/paid", async (req, res) => {
   if (stream.verifying) return res.status(409).json({ error: "a payment is already being verified" });
 
   stream.verifying = true;
+  stream.lastActivity = Date.now();
   const started = performance.now();
   try {
     const chunkIndex = stream.paid;
@@ -113,6 +149,7 @@ app.post("/paid", async (req, res) => {
     if (!check.ok) return res.status(402).json({ error: check.reason, verifyMs });
 
     stream.paid++;
+    stream.lastActivity = Date.now();
     if (stream.paid < stream.chunks.length) sendChunk(stream, stream.paid);
     else send(stream, "done", { paid: stream.paid });
 

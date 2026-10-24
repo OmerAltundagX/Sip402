@@ -20,6 +20,8 @@ const PHASE_LABEL: Record<Phase, string> = {
   opening: "Opening session",
   warming: "Preparing session key",
   streaming: "Streaming",
+  paused: "Paused",
+  expired: "Stream timed out",
   closing: "Closing session",
   sweeping: "Sweeping leftover gas",
   done: "Session closed",
@@ -154,13 +156,31 @@ export default function Home() {
                   </option>
                 ))}
               </select>
-              {active && phase === "streaming" ? (
-                <button
-                  onClick={() => session.current?.stop()}
-                  className="rounded-xl bg-red-500 px-6 py-3 font-semibold text-white hover:bg-red-500/85"
-                >
-                  Stop
-                </button>
+              {phase === "streaming" || phase === "paused" || phase === "expired" ? (
+                <div className="flex gap-2">
+                  {phase === "streaming" && (
+                    <button
+                      onClick={() => session.current?.pause()}
+                      className="rounded-xl border border-line bg-background px-5 py-3 font-semibold hover:border-monad"
+                    >
+                      Pause
+                    </button>
+                  )}
+                  {phase === "paused" && (
+                    <button
+                      onClick={() => session.current?.resume()}
+                      className="rounded-xl bg-monad px-5 py-3 font-semibold text-white hover:bg-monad/85"
+                    >
+                      Resume
+                    </button>
+                  )}
+                  <button
+                    onClick={() => session.current?.cancel()}
+                    className="rounded-xl bg-red-500 px-5 py-3 font-semibold text-white hover:bg-red-500/85"
+                  >
+                    Cancel
+                  </button>
+                </div>
               ) : (
                 <button
                   onClick={onAsk}
@@ -205,7 +225,9 @@ export default function Home() {
               </div>
             )}
             {chunks.length === 0 && phase === "idle" && (
-              <p className="text-muted">Connect your wallet, pick a question and press Ask. You can stop at any moment.</p>
+              <p className="text-muted">
+                Connect your wallet, pick a question and press Ask. Pause or cancel at any moment.
+              </p>
             )}
             <p className="text-lg leading-relaxed">
               {chunks.map((c, i) => (
@@ -216,6 +238,20 @@ export default function Home() {
               {waitingForPayment && <span className="ml-1 inline-block h-5 w-2 animate-pulse bg-monad align-middle" />}
             </p>
             {waitingForPayment && <p className="mt-3 text-xs text-muted">Paying for this chunk on Monad…</p>}
+            {phase === "paused" && (
+              <p className="mt-3 text-xs text-muted">
+                Paused. The session stays open on-chain and nothing is charged. Resume continues this answer without a new
+                wallet prompt.
+              </p>
+            )}
+            {phase === "expired" && (
+              <div className="mt-4 rounded-xl border border-amber-400/40 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+                The provider closed this stream because it sat paused too long (about 5 minutes), so it can no longer be
+                resumed. Your deposit
+                is safe in the contract: press <span className="font-semibold">Cancel</span> to close the session and get the
+                unspent balance back.
+              </div>
+            )}
 
             {closed && (
               <div className="mt-6 rounded-xl border border-line bg-background/60 p-4 text-sm">

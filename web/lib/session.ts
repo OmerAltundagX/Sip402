@@ -26,14 +26,24 @@ export const publicClient = createPublicClient({
 
 export type ProviderInfo = { contract: Address; provider: Address; pricePerChunk: bigint };
 
-export type Phase = "idle" | "opening" | "warming" | "streaming" | "closing" | "sweeping" | "done" | "error";
+export type Phase =
+  | "idle"
+  | "opening"
+  | "warming"
+  | "streaming"
+  | "paused"
+  | "expired"
+  | "closing"
+  | "sweeping"
+  | "done"
+  | "error";
 
 export type Payment = {
   index: number;
   hash: Hash;
   /** Send to receipt, measured in the browser. */
   confirmMs: number;
-  /** Provider's on-chain check before releasing the next chunk; null if reported after Stop. */
+  /** Provider's on-chain check before releasing the next chunk; null if reported after Cancel. */
   verifyMs: number | null;
   /** gasUsed × effectiveGasPrice from the receipt. */
   feeWei: bigint;
@@ -91,7 +101,14 @@ export class SipSession {
   private syncSendSupported = true;
   private source?: EventSource;
   private queue: Promise<void> = Promise.resolve();
+  /** Cancelled, or the spending cap was reached: no further payments, close is pending or done. */
   private stopped = false;
+  private paused = false;
+  /** The provider dropped the stream after the idle timeout; only Cancel is possible. */
+  private expired = false;
+  /** Chunk that arrived while paused; it is paid for on Resume. */
+  private pendingIndex?: number;
+  private lastChunkIndex = -1;
   private finished?: Promise<void>;
 
   constructor(
@@ -110,13 +127,37 @@ export class SipSession {
     }
   }
 
-  /** User pressed Stop: finish the in-flight payment, then close and refund. */
-  stop() {
+  /**
+   * Stop paying for new chunks. An in-flight payment still finishes; the session stays
+   * open on-chain and no transaction is sent until Resume or Cancel.
+   */
+  pause() {
+    if (this.paused || this.stopped || this.finished) return;
+    this.paused = true;
+    this.events.onPhase("paused", "No payments are sent while paused");
+  }
+
+  /** Continue paying from the next chunk of the same answer. No wallet popup. */
+  resume() {
+    if (!this.paused || this.expired || this.stopped || this.finished) return;
+    this.paused = false;
+    this.events.onPhase("streaming");
+    const index = this.pendingIndex;
+    this.pendingIndex = undefined;
+    if (index !== undefined) this.enqueuePayment(index);
+  }
+
+  /** Close the session and refund the unspent balance. Works while streaming, paused or expired. */
+  cancel() {
     if (this.stopped) return;
     this.stopped = true;
     // The stream stays open until the in-flight payment settles, so the provider
     // still accepts its /paid report; closeAndSweep() closes it afterwards.
-    void this.queue.then(() => this.finish("stopped by user"));
+    void this.queue.then(() => this.finish("cancelled by user"));
+  }
+
+  private enqueuePayment(index: number) {
+    this.queue = this.queue.then(() => this.payFor(index)).catch((err) => this.fail(err));
   }
 
   private async open(capWei: bigint) {
@@ -206,25 +247,39 @@ export class SipSession {
     const source = new EventSource(`${SERVER_URL}/stream/${this.token}`);
     this.source = source;
     source.addEventListener("chunk", (e) => {
-      // A chunk released by the last payment after Stop is neither shown nor paid for.
+      // A chunk released by the last payment after Cancel is neither shown nor paid for.
       if (this.stopped || this.finished) return;
       const chunk = JSON.parse((e as MessageEvent).data) as { index: number; text: string; total: number };
+      // A reconnect replays the chunks delivered so far.
+      if (chunk.index <= this.lastChunkIndex) return;
+      this.lastChunkIndex = chunk.index;
       this.events.onChunk(chunk);
-      this.queue = this.queue.then(() => this.payFor(chunk.index)).catch((err) => this.fail(err));
+      this.enqueuePayment(chunk.index);
     });
     source.addEventListener("done", () => {
       source.close();
       void this.queue.then(() => this.finish("answer complete"));
     });
-    source.onerror = () => {
-      if (this.stopped || this.finished) return;
+    source.addEventListener("expired", () => {
       source.close();
+      if (this.stopped || this.finished) return;
+      this.expired = true;
+      this.paused = true;
+      this.events.onPhase("expired", "The provider closed the idle stream. Cancel to get your refund.");
+    });
+    source.onerror = () => {
+      // EventSource reconnects on its own; only give up once it has closed for good.
+      if (source.readyState !== EventSource.CLOSED || this.stopped || this.finished || this.expired) return;
       this.fail(new Error("Lost connection to the provider"));
     };
   }
 
   private async payFor(index: number) {
     if (this.stopped || this.finished) return;
+    if (this.paused) {
+      this.pendingIndex = index;
+      return;
+    }
     if (this.paid >= this.maxChunks) {
       this.source?.close();
       this.stopped = true;
@@ -260,7 +315,7 @@ export class SipSession {
 
   /**
    * Tells the provider about a payment so it releases the next chunk. Returns the
-   * provider's verification time, or null for a late report after Stop.
+   * provider's verification time, or null for a late report after Cancel.
    */
   private async reportPayment(txHash: Hash): Promise<number | null> {
     const ending = () => this.stopped || this.finished !== undefined;
@@ -328,6 +383,14 @@ export class SipSession {
 
   private async closeAndSweep(reason: string) {
     this.source?.close();
+    // Best effort: the provider also drops the stream after its idle timeout.
+    if (this.token) {
+      void fetch(`${SERVER_URL}/end`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: this.token }),
+      }).catch(() => {});
+    }
     this.events.onPhase("closing", "Refunding the unspent balance");
     const receipt = await this.sendFromKey("close", this.gas.close);
     if (receipt.status !== "success") throw new Error("close() reverted");

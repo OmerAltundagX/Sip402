@@ -15,4 +15,6 @@ export const config = {
   pricePerChunk: parseEther(process.env.PRICE_PER_CHUNK_MON ?? "0.01"),
   wordsPerChunk: Number(process.env.WORDS_PER_CHUNK ?? 10),
   corsOrigin: process.env.CORS_ORIGIN ?? "http://localhost:3000",
+  /** How long a paused stream is kept without any payment before it is dropped. */
+  streamIdleTimeoutMs: Number(process.env.STREAM_IDLE_TIMEOUT_MS ?? 5 * 60_000),
 };
