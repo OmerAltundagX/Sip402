@@ -36,7 +36,7 @@ const payer = createWalletClient({ chain, transport: http(), account: payerAddre
 const sessionKey = privateKeyToAccount(generatePrivateKey());
 const keyWallet = createWalletClient({ chain, transport: http(), account: sessionKey });
 
-const cap = parseEther("0.1");
+const cap = parseEther("0.2"); // 20 chunks at 0.01 MON, more than any canned answer
 const gasAllowance = parseEther("0.5");
 const payerStart = await publicClient.getBalance({ address: payerAddress });
 

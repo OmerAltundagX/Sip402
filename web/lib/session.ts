@@ -33,8 +33,8 @@ export type Payment = {
   hash: Hash;
   /** Send to receipt, measured in the browser. */
   confirmMs: number;
-  /** Provider's on-chain check before releasing the next chunk. */
-  verifyMs: number;
+  /** Provider's on-chain check before releasing the next chunk; null if reported after Stop. */
+  verifyMs: number | null;
   /** gasUsed × effectiveGasPrice from the receipt. */
   feeWei: bigint;
   priceWei: bigint;
@@ -86,6 +86,8 @@ export class SipSession {
   private paid = 0;
   private fees = { maxFeePerGas: 0n, maxPriorityFeePerGas: 0n };
   private providerEmpty = false;
+  /** Per-session gas limits, estimated once the session exists (see GAS_LIMITS). */
+  private gas: { pay: bigint; close: bigint } = { pay: GAS_LIMITS.pay, close: GAS_LIMITS.close };
   private syncSendSupported = true;
   private source?: EventSource;
   private queue: Promise<void> = Promise.resolve();
@@ -112,7 +114,8 @@ export class SipSession {
   stop() {
     if (this.stopped) return;
     this.stopped = true;
-    this.source?.close();
+    // The stream stays open until the in-flight payment settles, so the provider
+    // still accepts its /paid report; closeAndSweep() closes it afterwards.
     void this.queue.then(() => this.finish("stopped by user"));
   }
 
@@ -158,7 +161,33 @@ export class SipSession {
     // funded session key must wait before its first transaction.
     this.events.onPhase("warming", "Letting the session key's gas allowance settle (~3 blocks)");
     await waitForBlock(receipt.blockNumber + RESERVE_LAG_BLOCKS);
-    this.nonce = await publicClient.getTransactionCount({ address: this.sessionKey.address, blockTag: "pending" });
+    const [nonce, pay, close] = await Promise.all([
+      publicClient.getTransactionCount({ address: this.sessionKey.address, blockTag: "pending" }),
+      this.estimateGas("pay", this.providerEmpty ? GAS_LIMITS.payFirstToEmptyProvider : GAS_LIMITS.pay),
+      this.estimateGas("close", GAS_LIMITS.close),
+    ]);
+    this.nonce = nonce;
+    this.gas = { pay, close };
+  }
+
+  /**
+   * Gas for this session's pay() or close(), plus 10% headroom. Storage layout makes
+   * the cost differ between sessions on Monad, so a fixed limit is either wasteful
+   * or occasionally too low.
+   */
+  private async estimateGas(functionName: "pay" | "close", fallback: bigint): Promise<bigint> {
+    try {
+      const estimate = await publicClient.estimateContractGas({
+        address: this.info.contract,
+        abi: sip402Abi,
+        functionName,
+        args: [this.sessionId],
+        account: this.sessionKey.address,
+      });
+      return (estimate * 110n) / 100n;
+    } catch {
+      return fallback;
+    }
   }
 
   private async stream(prompt: string) {
@@ -177,6 +206,8 @@ export class SipSession {
     const source = new EventSource(`${SERVER_URL}/stream/${this.token}`);
     this.source = source;
     source.addEventListener("chunk", (e) => {
+      // A chunk released by the last payment after Stop is neither shown nor paid for.
+      if (this.stopped || this.finished) return;
       const chunk = JSON.parse((e as MessageEvent).data) as { index: number; text: string; total: number };
       this.events.onChunk(chunk);
       this.queue = this.queue.then(() => this.payFor(chunk.index)).catch((err) => this.fail(err));
@@ -201,30 +232,52 @@ export class SipSession {
       return;
     }
 
-    const gas = this.providerEmpty ? GAS_LIMITS.payFirstToEmptyProvider : GAS_LIMITS.pay;
     const started = performance.now();
-    const receipt = await this.sendFromKey("pay", gas);
+    const receipt = await this.sendFromKey("pay", this.gas.pay);
     const confirmMs = performance.now() - started;
-    if (receipt.status !== "success") throw new Error(`pay() for chunk ${index + 1} reverted`);
-    this.providerEmpty = false;
+    if (receipt.status !== "success") throw new Error(`pay() for chunk ${index + 1} reverted (tx ${receipt.transactionHash})`);
     this.paid++;
 
-    const res = await fetch(`${SERVER_URL}/paid`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token: this.token, txHash: receipt.transactionHash }),
-    });
-    const body = await res.json();
-    if (!res.ok) throw new Error(`Provider rejected payment: ${body.error}`);
+    // The first payment created the provider's account; later ones are cheaper.
+    const reestimate = this.providerEmpty
+      ? this.estimateGas("pay", GAS_LIMITS.pay).then((gas) => {
+          this.gas.pay = gas;
+          this.providerEmpty = false;
+        })
+      : undefined;
 
+    // The payment is on-chain either way, so it is recorded even if the report below is late.
+    const [verifyMs] = await Promise.all([this.reportPayment(receipt.transactionHash), reestimate]);
     this.events.onPayment({
       index,
       hash: receipt.transactionHash,
       confirmMs,
-      verifyMs: body.verifyMs,
+      verifyMs,
       feeWei: receipt.gasUsed * receipt.effectiveGasPrice,
       priceWei: this.info.pricePerChunk,
     });
+  }
+
+  /**
+   * Tells the provider about a payment so it releases the next chunk. Returns the
+   * provider's verification time, or null for a late report after Stop.
+   */
+  private async reportPayment(txHash: Hash): Promise<number | null> {
+    const ending = () => this.stopped || this.finished !== undefined;
+    try {
+      const res = await fetch(`${SERVER_URL}/paid`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: this.token, txHash }),
+      });
+      const body = await res.json();
+      if (res.ok) return body.verifyMs;
+      if (ending()) return null;
+      throw new Error(`Provider rejected payment: ${body.error}`);
+    } catch (err) {
+      if (ending()) return null;
+      throw err;
+    }
   }
 
   /** Sends pay() or close() from the session key and returns its receipt. */
@@ -276,7 +329,7 @@ export class SipSession {
   private async closeAndSweep(reason: string) {
     this.source?.close();
     this.events.onPhase("closing", "Refunding the unspent balance");
-    const receipt = await this.sendFromKey("close", GAS_LIMITS.close);
+    const receipt = await this.sendFromKey("close", this.gas.close);
     if (receipt.status !== "success") throw new Error("close() reverted");
     const [closed] = parseEventLogs({ abi: sip402Abi, logs: receipt.logs, eventName: "SessionClosed" });
     this.events.onClosed({

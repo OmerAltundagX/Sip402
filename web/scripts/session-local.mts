@@ -6,6 +6,8 @@ import { createPublicClient, createWalletClient, formatEther, http, parseEther }
 
 const RPC = process.env.RPC ?? "http://127.0.0.1:8545";
 const STOP_AFTER = process.env.STOP_AFTER ? Number(process.env.STOP_AFTER) : Infinity;
+// Press Stop ~100 ms after chunk n arrives, while its pay() is still in flight.
+const STOP_IN_FLIGHT = process.env.STOP_IN_FLIGHT ? Number(process.env.STOP_IN_FLIGHT) : undefined;
 process.env.NEXT_PUBLIC_RPC_URL = RPC;
 (globalThis as { EventSource?: unknown }).EventSource = EventSource;
 
@@ -30,7 +32,10 @@ await new Promise<void>((resolve, reject) => {
       if (phase === "done") resolve();
     },
     onOpened: (o) => console.log(`opened #${o.sessionId}, gas allowance ${formatEther(o.gasAllowanceWei)} MON`),
-    onChunk: (c) => console.log(`  [${c.index + 1}/${c.total}] ${c.text.trim()}`),
+    onChunk: (c) => {
+      console.log(`  [${c.index + 1}/${c.total}] ${c.text.trim()}`);
+      if (c.index + 1 === STOP_IN_FLIGHT) setTimeout(() => session.stop(), 100);
+    },
     onPayment: (p) => {
       paid++;
       console.log(`  paid #${p.index + 1}: ${p.confirmMs.toFixed(0)} ms, verify ${p.verifyMs} ms, fee ${formatEther(p.feeWei)}`);
@@ -52,6 +57,7 @@ await new Promise<void>((resolve, reject) => {
 const after = await reader.getBalance({ address: payer });
 const net = before - after;
 console.log(`payer net cost ${formatEther(net)} MON for ${paid} chunks`);
+if (STOP_IN_FLIGHT && paid !== STOP_IN_FLIGHT) throw new Error(`expected the in-flight payment to finish, paid ${paid}`);
 if (refund !== cap - BigInt(paid) * info.pricePerChunk) throw new Error("refund mismatch");
 if (swept === 0n) throw new Error("expected a sweep");
 // Net cost = content + all gas; the gas allowance must have come back.
