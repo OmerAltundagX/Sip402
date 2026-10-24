@@ -20,14 +20,17 @@ export const SIP402_ADDRESS = "0x0654aB49C0AF16c0E660E84A8A879e497095a6D8" as co
 // Monad prices cold storage per page: a session whose three struct slots
 // straddle a page boundary pays one extra cold access (+8,095 gas). The web
 // client therefore estimates each call for the actual session and adds
-// GAS_BUFFER_PCT; these worst-case values (+5%, rounded up) are only the
-// fallback and the gas allowance budget.
-export const GAS_BUFFER_PCT = 5n;
+// GAS_BUFFER_PCT; these worst-case values (+15%, rounded up) are only the
+// fallback and the gas allowance budget, so they always cover the per-session limit.
+//
+// 15% is larger than the +8,095 page-crossing cost (~13-15%), so even an
+// estimate taken on a non-crossing path cannot leave pay()/close() short.
+export const GAS_BUFFER_PCT = 15n;
 export const GAS_LIMITS = {
-  openSession: 160_000n, // measured 143,732 (~151,800 if the new session straddles a page)
-  pay: 66_000n, // measured 54,683, straddling 62,778 (provider already holds MON)
-  payFirstToEmptyProvider: 93_000n, // measured 79,981, straddling 88,076 (creates provider account)
-  close: 67_000n, // measured 54,901, straddling 62,996 (via session key)
+  openSession: 175_000n, // measured 143,732 (~151,800 if the new session straddles a page)
+  pay: 73_000n, // measured 54,683, straddling 62,778 (provider already holds MON)
+  payFirstToEmptyProvider: 102_000n, // measured 79,981, straddling 88,076 (creates provider account)
+  close: 73_000n, // measured 54,901, straddling 62,996 (via session key)
   transfer: 21_000n, // sweep: exact, a plain transfer always uses 21,000
 } as const;
 
