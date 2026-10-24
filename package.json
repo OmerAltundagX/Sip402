@@ -1,9 +1,14 @@
 {
   "name": "sip402",
   "private": true,
-  "workspaces": ["shared", "server", "web"],
+  "workspaces": [
+    "shared",
+    "server",
+    "web"
+  ],
   "scripts": {
     "server": "npm run dev -w server",
-    "web": "npm run dev -w web"
+    "web": "npm run dev -w web",
+    "agent": "tsx agent/agent-demo.ts"
   }
 }
