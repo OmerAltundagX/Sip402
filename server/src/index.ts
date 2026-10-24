@@ -55,8 +55,12 @@ function sendChunk(stream: Stream, index: number) {
 }
 
 const app = express();
-app.use(cors({ origin: config.corsOrigin }));
+app.use(cors({ origin: config.allowedOrigins }));
 app.use(express.json());
+
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, streams: streams.size });
+});
 
 app.get("/info", (_req, res) => {
   res.json({
@@ -107,12 +111,16 @@ app.get("/stream/:token", (req, res) => {
   const stream = streams.get(req.params.token);
   if (!stream) return res.status(404).end();
 
+  // Headers that keep reverse proxies (Render, Cloudflare, nginx) from buffering the stream.
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache, no-transform",
     Connection: "keep-alive",
     "X-Accel-Buffering": "no",
   });
+  res.flushHeaders();
+  res.socket?.setNoDelay(true);
+  res.write(": connected\n\n");
   stream.client = res;
   stream.lastActivity = Date.now();
 
@@ -172,5 +180,6 @@ app.use((err: Error, _req: express.Request, res: Response, _next: express.NextFu
 app.listen(config.port, () => {
   console.log(`Sip402 provider listening on http://localhost:${config.port}`);
   console.log(`contract ${config.contract}, provider ${config.provider}`);
+  console.log(`allowed origins: ${config.allowedOrigins.join(", ")}`);
   console.log(`tiers: ${config.tiers.map((t) => `${t.label} ${formatEther(t.pricePerChunk)} MON`).join(", ")}`);
 });

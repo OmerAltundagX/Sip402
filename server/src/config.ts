@@ -31,7 +31,11 @@ export const config = {
   provider: getAddress(required("PROVIDER_ADDRESS")),
   tiers: parseTiers(process.env.PRICE_TIERS ?? "fast:Fast:0.0001,smart:Smart:0.0003,pro:Pro:0.0005"),
   wordsPerChunk: Number(process.env.WORDS_PER_CHUNK ?? 10),
-  corsOrigin: process.env.CORS_ORIGIN ?? "http://localhost:3000",
+  /** Comma-separated web origins allowed to call the API, e.g. https://sip402.vercel.app,http://localhost:3000 */
+  allowedOrigins: (process.env.ALLOWED_ORIGINS ?? process.env.CORS_ORIGIN ?? "http://localhost:3000")
+    .split(",")
+    .map((origin) => origin.trim().replace(/\/+$/, ""))
+    .filter(Boolean),
   /** How long a paused stream is kept without any payment before it is dropped. */
   streamIdleTimeoutMs: Number(process.env.STREAM_IDLE_TIMEOUT_MS ?? 5 * 60_000),
 };

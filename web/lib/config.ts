@@ -1,4 +1,4 @@
-export const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:3001";
+export const SERVER_URL = (process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:3001").replace(/\/+$/, "");
 /** Override to use a keyed RPC if the public endpoint rate-limits. */
 export const RPC_URL = process.env.NEXT_PUBLIC_RPC_URL || undefined;
 /** Optional second RPC, used when the primary still fails after its rate-limit retries. */

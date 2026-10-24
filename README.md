@@ -25,6 +25,8 @@ forge script script/Deploy.s.sol --rpc-url monad --account <keystore> --broadcas
 ./script/export-abi.sh   # regenerates shared/sip402Abi.ts after contract changes
 ```
 
+See [DEPLOY.md](DEPLOY.md) for the Render (server) and Vercel (web) settings.
+
 ## Repository layout
 
 | Path | What |

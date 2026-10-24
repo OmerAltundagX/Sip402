@@ -10,5 +10,8 @@
     "server": "npm run dev -w server",
     "web": "npm run dev -w web",
     "agent": "tsx agent/agent-demo.ts"
+  },
+  "engines": {
+    "node": "20.x"
   }
 }
